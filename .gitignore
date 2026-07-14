@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+*.pdb
+Cargo.lock
+UPGRADE_PLAN.md
+SECURITY_AND_PERFORMANCE.md
+PLAN_*.md
+# yantra-coding-agent internals
+.harness.db*
+.harness/
+.yantra-scratch.db*
