@@ -164,6 +164,43 @@ fn patch_validation(mut source: String) -> String {
 "#,
         "create_symlink",
     );
+
+    replace_section(
+        &mut source,
+        "fn check_symlinks_in_path",
+        "\n#[cfg(test)]",
+        r#"fn check_symlinks_in_path(path: &Path) -> std::result::Result<(), ()> {
+    if !path.is_absolute() {
+        return Err(());
+    }
+
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::CurDir | Component::ParentDir => return Err(()),
+            Component::Normal(name) => {
+                current.push(name);
+                if current.is_symlink() {
+                    return Err(());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+"#,
+        "Windows symlink path traversal",
+    );
+
+    replace_once(
+        &mut source,
+        "        let p = Path::new(\"/nonexistent_dir_xyzabc/nonexistent_file\");\n        assert!(check_symlinks_in_path(p).is_ok());",
+        "        let path = std::env::current_dir()\n            .unwrap()\n            .join(\"nonexistent_dir_xyzabc\")\n            .join(\"nonexistent_file\");\n        assert!(check_symlinks_in_path(&path).is_ok());",
+        "platform-neutral clean path test",
+    );
+
     source
 }
 
