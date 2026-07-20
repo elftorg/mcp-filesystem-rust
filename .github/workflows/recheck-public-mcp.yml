@@ -1,6 +1,8 @@
 name: Recheck published MCP endpoint
 
 on:
+  push:
+    branches: [test/recheck-public-mcp-20260720]
   pull_request:
     branches: [main]
 
