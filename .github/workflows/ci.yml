@@ -38,6 +38,24 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features
       - name: Test
-        run: cargo test --all-features
+        id: tests
+        shell: bash
+        run: |
+          set +e
+          cargo test --all-features > ci-test.log 2>&1
+          status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          tail -n 200 ci-test.log
+          exit 0
+      - name: Persist failing test report
+        if: steps.tests.outputs.exit_code != '0'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ci-test.log
+          git commit -m "ci: capture failing test report" || true
+          git push origin HEAD:${{ github.head_ref || github.ref_name }}
+          exit 1
       - name: Release build
         run: cargo build --release
