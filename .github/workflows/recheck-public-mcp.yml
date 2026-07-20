@@ -1,10 +1,8 @@
-name: Diagnose ChatGPT MCP connector creation
+name: Recheck ChatGPT origin after service restart
 
 on:
   push:
     branches: [test/recheck-public-mcp-20260720]
-  pull_request:
-    branches: [main]
 
 permissions:
   contents: read
@@ -15,77 +13,79 @@ jobs:
     timeout-minutes: 5
     env:
       MCP_URL: https://b24.alwaysdata.net/mcpfs/mcp
+      HEALTH_URL: https://b24.alwaysdata.net/mcpfs/health
+      BACKEND_HEALTH_URL: https://b24.alwaysdata.net/mcpfs/health/backend
       ORIGIN: https://chatgpt.com
     steps:
-      - name: OPTIONS and GET probes
+      - name: Probe endpoint with and without ChatGPT Origin
         shell: bash
         run: |
-          set -euo pipefail
-          for method in OPTIONS GET; do
-            echo "== $method =="
-            curl -sS --connect-timeout 8 --max-time 15 -X "$method" -D - -o body \
-              -H "Origin: $ORIGIN" \
-              -H 'Accept: application/json, text/event-stream' \
-              "$MCP_URL" || true
-            cat body || true; echo
-          done
+          set -u
+          probe() {
+            name="$1"; shift
+            rm -f headers body err
+            metrics=$(curl -sS --connect-timeout 8 --max-time 20 -D headers -o body \
+              -w 'code=%{http_code} start=%{time_starttransfer}s total=%{time_total}s bytes=%{size_download}' \
+              "$@" 2>err)
+            rc=$?
+            echo "== $name =="
+            echo "rc=$rc $metrics"
+            cat headers 2>/dev/null || true
+            cat err 2>/dev/null || true
+            head -c 1200 body 2>/dev/null || true
+            echo
+          }
 
-      - name: Initialize across protocol versions with ChatGPT origin
-        shell: bash
-        run: |
-          set -euo pipefail
-          for version in 2025-11-25 2025-06-18 2025-03-26 2024-11-05; do
-            echo "== protocol $version =="
-            rm -f h b
-            code=$(curl -sS --connect-timeout 8 --max-time 20 -D h -o b -w '%{http_code}' \
-              -H "Origin: $ORIGIN" \
-              -H 'User-Agent: OpenAI-ChatGPT-MCP/1.0' \
-              -H 'Content-Type: application/json' \
-              -H 'Accept: application/json, text/event-stream' \
-              --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"$version\",\"capabilities\":{},\"clientInfo\":{\"name\":\"ChatGPT\",\"version\":\"1.0\"}}}" \
-              "$MCP_URL")
-            echo "http=$code"
-            cat h
-            cat b; echo
-          done
+          probe 'health no origin' "$HEALTH_URL"
+          probe 'backend health no origin' "$BACKEND_HEALTH_URL"
+          probe 'GET mcp no origin' -H 'Accept: text/event-stream' "$MCP_URL"
+          probe 'GET mcp ChatGPT origin' -H "Origin: $ORIGIN" -H 'Accept: text/event-stream' "$MCP_URL"
 
-      - name: Inspect successful session and tool metadata
+          init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ChatGPT","version":"1.0"}}}'
+          probe 'initialize no origin' \
+            -H 'User-Agent: OpenAI-ChatGPT-MCP/1.0' \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            --data "$init" "$MCP_URL"
+          probe 'initialize ChatGPT origin' \
+            -H "Origin: $ORIGIN" \
+            -H 'User-Agent: OpenAI-ChatGPT-MCP/1.0' \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            --data "$init" "$MCP_URL"
+
+      - name: Full ChatGPT-style MCP flow
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsS --connect-timeout 8 --max-time 20 -D init.h -o init.json \
+          curl -fsS --connect-timeout 8 --max-time 20 -D init.headers -o init.json \
             -H "Origin: $ORIGIN" \
             -H 'User-Agent: OpenAI-ChatGPT-MCP/1.0' \
             -H 'Content-Type: application/json' \
             -H 'Accept: application/json, text/event-stream' \
             --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ChatGPT","version":"1.0"}}}' \
             "$MCP_URL"
-          sid=$(grep -i '^mcp-session-id:' init.h | head -1 | cut -d: -f2- | tr -d ' \r')
+          sid=$(grep -i '^mcp-session-id:' init.headers | head -1 | cut -d: -f2- | tr -d ' \r')
           test -n "$sid"
           negotiated=$(jq -r '.result.protocolVersion' init.json)
-          echo "negotiated=$negotiated session=${sid:0:8}..."
+          test "$negotiated" != null
+          echo "session=${sid:0:8}... negotiated=$negotiated"
 
           common=(-H "Origin: $ORIGIN" -H 'User-Agent: OpenAI-ChatGPT-MCP/1.0' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "MCP-Session-Id: $sid" -H "MCP-Protocol-Version: $negotiated")
-          curl -fsS --connect-timeout 8 --max-time 20 -o notify.json "${common[@]}" \
-            --data '{"jsonrpc":"2.0","method":"notifications/initialized"}' "$MCP_URL"
+          code=$(curl -sS --connect-timeout 8 --max-time 20 -o notify.body -w '%{http_code}' "${common[@]}" \
+            --data '{"jsonrpc":"2.0","method":"notifications/initialized"}' "$MCP_URL")
+          case "$code" in 200|202|204) ;; *) cat notify.body; exit 1;; esac
+
           curl -fsS --connect-timeout 8 --max-time 20 -o tools.json "${common[@]}" \
             --data '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' "$MCP_URL"
+          jq -e '.result.tools | type == "array" and length > 0' tools.json >/dev/null
+          jq '{toolCount:(.result.tools|length),toolNames:(.result.tools|map(.name))}' tools.json
 
-          jq '{count:(.result.tools|length), names:(.result.tools|map(.name)), missingDescription:(.result.tools|map(select((.description//"")==""))|map(.name)), missingInputSchema:(.result.tools|map(select(.inputSchema==null))|map(.name)), securitySchemes:(.result.tools|map({name,securitySchemes:(._meta.securitySchemes // .securitySchemes // null)})), annotations:(.result.tools|map({name,annotations}))}' tools.json
-          jq -e '.result.tools | type=="array" and length>0 and all(.name|type=="string") and all(.description|type=="string") and all(.inputSchema|type=="object")' tools.json >/dev/null
+          curl -fsS --connect-timeout 8 --max-time 20 -o resources.json "${common[@]}" \
+            --data '{"jsonrpc":"2.0","id":3,"method":"resources/list"}' "$MCP_URL"
+          jq -e '.result.resources | type == "array"' resources.json >/dev/null
+          jq '{resourceCount:(.result.resources|length),resourceUris:(.result.resources|map(.uri)|.[0:10])}' resources.json
 
-          code=$(curl -sS --connect-timeout 8 --max-time 20 -X DELETE -o delete.body -w '%{http_code}' "${common[@]}" "$MCP_URL")
-          echo "delete_http=$code"
-
-      - name: OAuth discovery probes
-        shell: bash
-        run: |
-          set -euo pipefail
-          for url in \
-            https://b24.alwaysdata.net/.well-known/oauth-protected-resource \
-            https://b24.alwaysdata.net/.well-known/oauth-protected-resource/mcpfs/mcp \
-            https://b24.alwaysdata.net/mcpfs/.well-known/oauth-protected-resource; do
-            echo "== $url =="
-            curl -sS --connect-timeout 8 --max-time 15 -D - -o body "$url" || true
-            head -c 500 body || true; echo
-          done
+          delete_code=$(curl -sS --connect-timeout 8 --max-time 20 -X DELETE -o delete.body -w '%{http_code}' "${common[@]}" "$MCP_URL")
+          echo "delete_http=$delete_code"
+          test "$delete_code" = 204
