@@ -8,7 +8,13 @@ pub mod server;
 pub mod structures;
 pub mod tls;
 pub mod tools;
+
+#[cfg(not(windows))]
 pub mod validation;
+#[cfg(windows)]
+pub mod validation {
+    include!(concat!(env!("OUT_DIR"), "/validation_windows.rs"));
+}
 
 use clap::Parser;
 
