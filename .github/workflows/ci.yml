@@ -8,54 +8,22 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Apply rustfmt
-        run: cargo fmt --all
-      - name: Commit rustfmt output
-        shell: bash
-        run: |
-          if ! git diff --quiet; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -- '*.rs'
-            git commit -m "style: apply cargo fmt"
-            git push origin HEAD:${{ github.head_ref || github.ref_name }}
-          fi
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets --all-features
       - name: Test
-        id: tests
-        shell: bash
-        run: |
-          set +e
-          cargo test --all-features > ci-test.log 2>&1
-          status=$?
-          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
-          tail -n 200 ci-test.log
-          exit 0
-      - name: Persist failing test report
-        if: steps.tests.outputs.exit_code != '0'
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ci-test.log
-          git commit -m "ci: capture failing test report" || true
-          git push origin HEAD:${{ github.head_ref || github.ref_name }}
-          exit 1
+        run: cargo test --all-features
       - name: Release build
         run: cargo build --release
