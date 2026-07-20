@@ -12,22 +12,29 @@ permissions:
 jobs:
   endpoint:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 3
     steps:
-      - name: DNS
+      - name: Probe public URLs
+        shell: bash
         run: |
-          getent ahosts b24.alwaysdata.net || true
-          getent ahosts services-b24.alwaysdata.net || true
-      - name: TLS handshake
-        run: timeout 15 openssl s_client -connect b24.alwaysdata.net:443 -servername b24.alwaysdata.net -brief </dev/null || true
-      - name: Website root
-        run: curl -v --connect-timeout 10 --max-time 20 https://b24.alwaysdata.net/ -o /dev/null || true
-      - name: Proxy health
-        run: curl -v --connect-timeout 10 --max-time 20 https://b24.alwaysdata.net/mcpfs/health -o health.body || true; test -f health.body && cat health.body || true
-      - name: MCP initialize
-        run: |
-          curl -v --connect-timeout 10 --max-time 25 \
-            -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+          probe() {
+            label="$1"; shift
+            rm -f body err
+            set +e
+            metrics=$(curl -sS --connect-timeout 8 --max-time 15 -o body \
+              -w 'code=%{http_code} ip=%{remote_ip} connect=%{time_connect}s tls=%{time_appconnect}s start=%{time_starttransfer}s total=%{time_total}s bytes=%{size_download}' "$@" 2>err)
+            rc=$?
+            set -e
+            echo "[$label] rc=$rc $metrics"
+            test -s err && { printf '[%s] error: ' "$label"; cat err; } || true
+            test -s body && { printf '[%s] body: ' "$label"; head -c 800 body; echo; } || true
+          }
+          getent ahosts b24.alwaysdata.net | head -6
+          probe root https://b24.alwaysdata.net/
+          probe health https://b24.alwaysdata.net/mcpfs/health
+          probe backend-health https://b24.alwaysdata.net/mcpfs/health/backend
+          probe initialize \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
             --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"github-actions-diagnostics","version":"1.0"}}}' \
-            https://b24.alwaysdata.net/mcpfs/mcp -o initialize.body || true
-          test -f initialize.body && cat initialize.body || true
+            https://b24.alwaysdata.net/mcpfs/mcp
