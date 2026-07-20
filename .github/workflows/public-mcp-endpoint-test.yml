@@ -2,11 +2,9 @@ name: Public MCP endpoint test
 
 on:
   push:
-    branches:
-      - codex/public-mcp-endpoint-test
+    branches: [codex/public-mcp-endpoint-test]
   pull_request:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
@@ -15,11 +13,63 @@ jobs:
   endpoint:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      MCP_URL: https://b24.alwaysdata.net/mcpfs/mcp
+      HEALTH_URL: https://b24.alwaysdata.net/mcpfs/health
+      BACKEND_HEALTH_URL: https://b24.alwaysdata.net/mcpfs/health/backend
     steps:
-      - uses: actions/checkout@v4
-      - name: Test MCP Streamable HTTP endpoint
-        env:
-          MCP_URL: https://b24.alwaysdata.net/mcpfs/mcp
-          HEALTH_URL: https://b24.alwaysdata.net/mcpfs/health
-          BACKEND_HEALTH_URL: https://b24.alwaysdata.net/mcpfs/health/backend
-        run: bash scripts/test-public-mcp.sh
+      - name: Proxy health
+        run: |
+          code=$(curl -sS --connect-timeout 10 --max-time 20 -o body -w '%{http_code}' "$HEALTH_URL")
+          echo "HTTP $code"; cat body; echo
+          test "$code" = 200
+          jq -e '.status == "ok"' body
+      - name: Backend health
+        run: |
+          code=$(curl -sS --connect-timeout 10 --max-time 20 -o body -w '%{http_code}' "$BACKEND_HEALTH_URL")
+          echo "HTTP $code"; cat body; echo
+          test "$code" = 200
+          jq -e '.status == "UP" or .status == "ok"' body
+      - name: Initialize
+        run: |
+          code=$(curl -sS --connect-timeout 10 --max-time 30 -D headers -o body -w '%{http_code}' \
+            -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"github-actions-endpoint-test","version":"1.0"}}}' "$MCP_URL")
+          echo "HTTP $code"; cat headers; cat body; echo
+          session=$(awk 'BEGIN{IGNORECASE=1}/^MCP-Session-Id:/{sub(/^[^:]+:[[:space:]]*/,"");sub(/\r$/,"");print;exit}' headers)
+          test "$code" = 200
+          test -n "$session"
+          jq -e '.result.protocolVersion != null and .result.capabilities.tools != null' body
+          echo "MCP_SESSION_ID=$session" >> "$GITHUB_ENV"
+      - name: Tools list
+        run: |
+          code=$(curl -sS --connect-timeout 10 --max-time 30 -o body -w '%{http_code}' \
+            -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            -H "MCP-Session-Id: $MCP_SESSION_ID" -H 'MCP-Protocol-Version: 2025-11-25' \
+            --data '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' "$MCP_URL")
+          echo "HTTP $code"; jq '{error, toolCount:(.result.tools|length), names:(.result.tools|map(.name))}' body
+          test "$code" = 200
+          jq -e '.result.tools | length > 0' body
+      - name: Resources list
+        run: |
+          code=$(curl -sS --connect-timeout 10 --max-time 30 -o body -w '%{http_code}' \
+            -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            -H "MCP-Session-Id: $MCP_SESSION_ID" -H 'MCP-Protocol-Version: 2025-11-25' \
+            --data '{"jsonrpc":"2.0","id":3,"method":"resources/list"}' "$MCP_URL")
+          echo "HTTP $code"; jq '{error, resourceCount:(.result.resources|length), uris:(.result.resources|map(.uri)|.[0:10])}' body
+          test "$code" = 200
+          jq -e '.result.resources | any(.uri == "ui://filesystem/browser-v1.html")' body
+      - name: SSE and close session
+        run: |
+          set +e
+          code=$(curl -sS -N --connect-timeout 10 --max-time 5 -D headers -o body -w '%{http_code}' \
+            -H 'Accept: text/event-stream' -H "MCP-Session-Id: $MCP_SESSION_ID" \
+            -H 'MCP-Protocol-Version: 2025-11-25' "$MCP_URL")
+          rc=$?; set -e
+          echo "SSE HTTP $code curl=$rc"; cat headers; cat body; echo
+          test "$code" = 200
+          grep -qi '^content-type: text/event-stream' headers
+          close=$(curl -sS --connect-timeout 10 --max-time 20 -o /dev/null -w '%{http_code}' -X DELETE \
+            -H "MCP-Session-Id: $MCP_SESSION_ID" -H 'MCP-Protocol-Version: 2025-11-25' "$MCP_URL")
+          echo "DELETE HTTP $close"
+          test "$close" = 204
