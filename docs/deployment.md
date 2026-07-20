@@ -75,6 +75,22 @@ location /mcp {
 Also proxy `/health` for orchestration checks. Keep `/info` and `/tools`
 private if their operational details should not be public.
 
+### PHP proxy for shared hosting
+
+For Apache/PHP hosting where Nginx or Caddy configuration is unavailable, use
+the proxy in [`deploy/php-proxy`](../deploy/php-proxy/README.md). It supports:
+
+- public path prefixes such as `/mcpfs/mcp` with forwarding to backend `/mcp`;
+- `POST`, `GET`/SSE and `DELETE` MCP requests;
+- `MCP-Session-Id`, `MCP-Protocol-Version`, `Authorization` and `Origin` headers;
+- streamed backend response bodies and response headers;
+- proxy and backend health endpoints;
+- environment variables or a local ignored `config.php`.
+
+PHP hosting must allow long-running requests for the `GET /mcp` SSE stream.
+Use a native reverse proxy when the provider enforces a short PHP execution
+limit or buffers FastCGI output.
+
 ## Environment
 
 | Variable | Purpose |
