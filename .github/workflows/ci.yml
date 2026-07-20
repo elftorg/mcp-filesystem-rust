@@ -28,7 +28,20 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
+        if: matrix.os != 'windows-latest'
         run: cargo clippy --all-targets --all-features
+      - name: Clippy on Windows
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cargo clippy --all-targets --all-features *>&1 | Tee-Object -FilePath clippy.log
+          exit $LASTEXITCODE
+      - name: Upload Windows clippy diagnostics
+        if: failure() && matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-windows-clippy-log
+          path: clippy.log
       - name: Test
         run: cargo test --all-features
       - name: Release build
