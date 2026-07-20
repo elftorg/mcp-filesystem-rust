@@ -1,0 +1,48 @@
+name: Apply direct Windows fix
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/windows-compat
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Extract and execute source patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from textwrap import dedent
+
+          workflow = Path('.github/workflows/ci.yml').read_text(encoding='utf-8')
+          marker = "python3 - <<'PY'\n"
+          start = workflow.index(marker) + len(marker)
+          end = workflow.index("\n          PY", start)
+          Path('/tmp/direct_patch.py').write_text(
+              dedent(workflow[start:end]),
+              encoding='utf-8',
+          )
+          PY
+          python3 /tmp/direct_patch.py
+          rm -f .github/workflows/apply-direct.yml
+          cargo fmt --all
+      - name: Commit direct source patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: compile filesystem modules natively on Windows"
+          git push origin HEAD:codex/windows-compat
