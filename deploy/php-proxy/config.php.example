@@ -1,0 +1,29 @@
+<?php
+
+declare(strict_types=1);
+
+return [
+    // URL of mcp-filesystem-rust without a trailing slash.
+    'backend_url' => 'http://services-b24.alwaysdata.net:8345',
+
+    // Public directory prefix. Use an empty string when deployed at domain root.
+    'base_path' => '/mcpfs',
+
+    'connect_timeout' => 5,
+    'request_timeout' => 60,
+    'max_request_bytes' => 16 * 1024 * 1024,
+
+    // Keep /info and /tools private by removing them from this list.
+    'allowed_paths' => [
+        '/mcp',
+        '/rpc',
+        '/health',
+        '/version',
+        '/info',
+        '/tools',
+    ],
+
+    // Usually false on shared hosting. Enable only when the backend expects
+    // the public Host header and upstream routing does not depend on Host.
+    'forward_original_host' => false,
+];
