@@ -77,7 +77,53 @@ mcp-filesystem --stdio --directories /path/to/allowed/dir --enable-read --enable
 ### HTTP mode
 
 ```sh
-mcp-filesystem --directories /path/to/allowed/dir --http-port 3001 --enable-all
+mcp-filesystem --directories /path/to/allowed/dir --host 127.0.0.1 --http-port 3001 --enable-all
+```
+
+### HTTP bind examples
+
+Bind to IPv4 loopback on the default HTTP port:
+
+```sh
+mcp-filesystem --directories /srv/data --host 127.0.0.1 --http-port 3001 --enable-read
+```
+
+Bind to IPv6 loopback:
+
+```sh
+mcp-filesystem --directories /srv/data --host ::1 --http-port 3001 --enable-read
+```
+
+When calling the HTTP endpoint over IPv6, wrap the literal address in brackets:
+
+```sh
+curl -X POST http://[::1]:3001/rpc -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+Bind to all IPv4 and IPv6 interfaces when the host OS supports dual-stack sockets:
+
+```sh
+mcp-filesystem --directories /srv/data --host :: --http-port 3001 --auth-token "$MCP_AUTH_TOKEN" --enable-all
+```
+
+Bind to all IPv4 interfaces explicitly:
+
+```sh
+mcp-filesystem --directories /srv/data --host 0.0.0.0 --http-port 3001 --auth-token "$MCP_AUTH_TOKEN" --enable-all
+```
+
+### Alwaysdata / IPv6-only hosting
+
+On IPv6-only hosts such as Alwaysdata, bind the HTTP transport to the IPv6 address provided by the platform, or to the IPv6 unspecified address if the platform expects the process to listen on all IPv6 interfaces. Use the platform-provided port when one is assigned through an environment variable:
+
+```sh
+mcp-filesystem --directories "$HOME/files" --host :: --http-port "$PORT" --auth-token "$MCP_AUTH_TOKEN" --enable-all
+```
+
+If Alwaysdata provides a concrete IPv6 address, pass it directly without URL brackets to `--host`; brackets are only for client URLs:
+
+```sh
+mcp-filesystem --directories "$HOME/files" --host 2001:db8::10 --http-port 3001 --auth-token "$MCP_AUTH_TOKEN" --enable-all
 ```
 
 ### Example MCP client configuration
@@ -99,14 +145,14 @@ mcp-filesystem --directories /path/to/allowed/dir --http-port 3001 --enable-all
 |---|---|---|
 | `-d, --directories <DIR>` | — | Directories to allow access to (repeatable) |
 | `-H, --host <HOST>` | `127.0.0.1` | Server host (HTTP transport) |
-| `--http-port <PORT>` | `3001` | HTTP server port |
+| `--http-port <PORT>` / `--port <PORT>` | `3001` | HTTP server port |
 | `-l, --log-level <LEVEL>` | `info` | Log level |
 | `--max-file-size <MB>` | `100` | Maximum file size (MB) for reads |
+| `--max-decompressed-size <MB>` | `1024` | Cap on decompression/extraction output (anti-bomb) |
 | `--stdio` | `false` | Run in stdio mode for MCP compatibility |
 | `--access-mode <MODE>` | `unrestricted` | `unrestricted` or `readonly` |
 | `--follow-symlinks` | `false` | Follow symbolic links |
 | `--request-timeout <SECS>` | `30` | Request timeout in seconds (enforced per request) |
-| `--max-decompressed-size <MB>` | `1024` | Cap on decompression/extraction output (anti-bomb) |
 | `--max-request-bytes <BYTES>` | `16777216` | Max size of a single stdio request line |
 | `--auth-token <TOKEN>` | — | Bearer token required on HTTP (`Authorization` header) |
 | `--tls-cert <PATH>` | — | PEM certificate chain to serve the HTTP transport over TLS (HTTPS). Requires `--tls-key` |
@@ -150,7 +196,7 @@ Category gating composes with `--access-mode readonly` (which additionally
 blocks all write tools).
 
 ```bash
-mcp-filesystem --http-port 3001 --tls-cert ./cert.pem --tls-key ./key.pem
+mcp-filesystem --directories /srv/data --host ::1 --http-port 3001 --tls-cert ./cert.pem --tls-key ./key.pem --enable-read
 ```
 
 ## MCP Compliance
@@ -186,8 +232,21 @@ Upgrading from 1.x? The result shape changed — see **[MIGRATION.md](./MIGRATIO
 
 - **Path sandboxing**: every path is canonicalized and checked against the allow-list. Symlink components are rejected unless `--follow-symlinks` is set; write destinations whose final component is a symlink are also rejected.
 - **Network exposure**: the default bind is loopback (`127.0.0.1`). Binding to a non-loopback host without `--auth-token` logs a prominent warning — the allow-listed directories would otherwise be reachable, unauthenticated, over the network.
-- **Resource limits**: request lines are size-capped (`--max-request-bytes`), requests are time-bounded (`--request-timeout`), decompression output is capped (`--max-decompressed-size`), and concurrent connections are bounded (`--max-connections`).
+- **Resource limits**: stdio request lines are size-capped (`--max-request-bytes`), requests are time-bounded (`--request-timeout`), and decompression output is capped (`--max-decompressed-size`).
 - **Cryptography posture (June 2026)**: the supported algorithms are deliberately limited to AES-256-GCM, ChaCha20-Poly1305, and post-quantum ML-KEM-768/1024 (FIPS 203). RSA-OAEP was removed — it is being deprecated by [CNSA 2.0](https://www.nsa.gov/Cybersecurity/Post-Quantum-Cryptography/) and [NIST IR 8547](https://csrc.nist.gov/pubs/ir/8547/ipd) and was the project's only source of an unfixable advisory (the `rsa` Marvin timing side-channel, [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)). `cargo audit` is clean with no acknowledged advisories. A hybrid `X25519 + ML-KEM-768` (X-Wing) mode is planned once a stable, audited Rust implementation is available — the current `x-wing` crate is still a pre-release.
+
+## GitHub Actions release binaries
+
+The repository includes a GitHub Actions workflow at `.github/workflows/release-binaries.yml`. It runs on `v*` tags and manual `workflow_dispatch` runs, builds release binaries with `cargo build --release`, and uploads the binaries as workflow artifacts.
+
+Current artifacts:
+
+| Artifact | Target | Output file |
+|---|---|---|
+| `mcp-filesystem-linux-x86_64` | `x86_64-unknown-linux-gnu` | Linux x86_64 executable |
+| `mcp-filesystem-windows-x86_64.exe` | `x86_64-pc-windows-msvc` | Windows x86_64 executable |
+
+The workflow uses a matrix so additional targets, such as Linux ARM64, can be added by appending another matrix entry.
 
 ## Development
 

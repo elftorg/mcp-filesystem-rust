@@ -24,7 +24,7 @@ pub struct Args {
     pub host: String,
 
     /// HTTP server port
-    #[arg(long, default_value = "3001")]
+    #[arg(long, visible_alias = "port", default_value = "3001")]
     pub http_port: u16,
 
     /// Log level
