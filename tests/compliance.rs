@@ -104,10 +104,12 @@ async fn initialize_falls_back_and_is_honest() {
     assert_eq!(res["protocolVersion"], "2025-11-25");
     assert!(res["instructions"].as_str().is_some_and(|s| !s.is_empty()));
 
-    // No falsely-advertised capabilities.
+    // Only implemented capabilities are advertised.
     let caps = &res["capabilities"];
     assert!(caps["tools"].is_object());
-    assert!(caps["resources"].is_null());
+    assert!(caps["resources"].is_object());
+    assert_eq!(caps["resources"]["subscribe"], false);
+    assert_eq!(caps["resources"]["listChanged"], false);
     assert!(caps["prompts"].is_null());
 }
 
