@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - codex/chatgpt-apps-sdk
+      - codex/windows-compat
   pull_request:
 
 permissions:
@@ -12,7 +12,13 @@ permissions:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
