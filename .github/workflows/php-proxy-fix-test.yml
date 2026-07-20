@@ -3,6 +3,8 @@ name: PHP proxy fix test
 on:
   push:
     branches: [fix/php-proxy-json-streamable-http]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
