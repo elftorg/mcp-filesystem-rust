@@ -150,10 +150,13 @@ mcp-filesystem --directories "$HOME/files" --host 2001:db8::10 --http-port 3001 
 | `--max-file-size <MB>` | `100` | Maximum file size (MB) for reads |
 | `--max-decompressed-size <MB>` | `1024` | Cap on decompression/extraction output (anti-bomb) |
 | `--stdio` | `false` | Run in stdio mode for MCP compatibility |
+| `--health` | `false` | Print local CLI health JSON and exit |
+| `--version` | — | Print the binary version and exit |
 | `--access-mode <MODE>` | `unrestricted` | `unrestricted` or `readonly` |
 | `--follow-symlinks` | `false` | Follow symbolic links |
 | `--request-timeout <SECS>` | `30` | Request timeout in seconds (enforced per request) |
 | `--max-request-bytes <BYTES>` | `16777216` | Max size of a single stdio request line |
+| `--max-http-body-bytes <BYTES>` | `16777216` | Max size of a single HTTP JSON-RPC request body |
 | `--auth-token <TOKEN>` | — | Bearer token required on HTTP (`Authorization` header) |
 | `--tls-cert <PATH>` | — | PEM certificate chain to serve the HTTP transport over TLS (HTTPS). Requires `--tls-key` |
 | `--tls-key <PATH>` | — | PEM private key matching `--tls-cert` |
@@ -270,3 +273,66 @@ result shape to be spec-compliant — see **[MIGRATION.md](./MIGRATION.md)**.
 ## License
 
 Licensed under the [Apache-2.0](LICENSE) license.
+
+## OpenAI Apps SDK / ChatGPT compatibility
+
+This server is compatible with ChatGPT's MCP HTTP transport when exposed over HTTPS. It intentionally does **not** ship ChatGPT UI resources, Apps SDK HTML resources, authentication flows, or MCP Inspector integration yet.
+
+### MCP and JSON-RPC behavior
+
+- `initialize` negotiates supported protocol revisions and returns honest server capabilities.
+- `notifications/initialized` and other `notifications/*` messages are accepted as JSON-RPC notifications.
+- `ping`, `tools/list`, `tools/call`, `prompts/list`, and `resources/list` are implemented.
+- `prompts/list` and `resources/list` return empty lists because this server currently exposes filesystem operations as tools only.
+- Unknown methods return standard JSON-RPC `-32601` errors.
+- Malformed JSON returns `-32700`; structurally invalid JSON-RPC requests return `-32600`; invalid parameters return `-32602`.
+- Tool execution failures are returned as MCP `CallToolResult` values with `isError: true` so clients and models can inspect the failure without treating it as a protocol failure.
+
+### HTTP endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/rpc` | MCP JSON-RPC endpoint. Requires `Content-Type: application/json`. |
+| `GET` | `/health` | Health check: `{"status":"UP","version":"...","transport":"http"}`. |
+| `GET` | `/version` | Returns the server version. |
+| `GET` | `/info` | Returns version, protocol version, enabled tool categories, enabled tool count, access mode, and allowed directories. |
+| `GET` | `/tools` | Diagnostic view of the same filtered tool descriptors returned by `tools/list`. |
+
+HTTP requests are bounded by `--max-http-body-bytes`, timed out by `--request-timeout`, and malformed requests return JSON-RPC error bodies where possible.
+
+### Example initialize request
+
+```sh
+curl -s http://127.0.0.1:3001/rpc \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"example","version":"1.0.0"}}}'
+```
+
+### Example tools/list request
+
+```sh
+curl -s http://127.0.0.1:3001/rpc \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+```
+
+### Example tools/call request
+
+```sh
+curl -s http://127.0.0.1:3001/rpc \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_allowed_directories","arguments":{}}}'
+```
+
+### Tool descriptors and responses
+
+Tool descriptors include `title`, `description`, `inputSchema`, `outputSchema`, and Apps SDK-compatible annotations. Read-only tools set `readOnlyHint: true`; writes set `readOnlyHint: false`; overwrite/delete-style tools set `destructiveHint: true`; bounded filesystem operations set `openWorldHint: false`.
+
+Tool responses follow MCP `CallToolResult` shape and include `content` plus `structuredContent` whenever the underlying action returns a JSON object. `_meta` is supported by the response shape, but no ChatGPT UI-specific `_meta.ui.resourceUri` values are emitted until UI resources are implemented.
+
+### Compatibility limitations
+
+- ChatGPT UI resources / Apps SDK HTML resources are not implemented yet.
+- Authentication flows are not implemented; the existing optional bearer token remains available for HTTP deployments.
+- MCP Inspector integration is not included.
+- No prompts or resources are currently exposed; their list methods return empty arrays.

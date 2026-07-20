@@ -23,16 +23,89 @@ static ALL_TOOL_DEFS: LazyLock<Vec<Value>> = LazyLock::new(|| {
 /// entirely; with an empty `enabled` set the payload is `{"tools":[]}`. The
 /// result is cached per-`Config` (see `Config::tools_list_bytes`).
 pub fn build_tools_list_response(enabled: &[crate::tools::ToolCategory]) -> Vec<u8> {
-    let tools: Vec<&Value> = ALL_TOOL_DEFS
+    let tools: Vec<Value> = ALL_TOOL_DEFS
         .iter()
         .filter(|t| {
             t.get("name")
                 .and_then(Value::as_str)
                 .is_some_and(|name| crate::tools::is_tool_available(name, enabled))
         })
+        .map(enhance_tool_descriptor)
         .collect();
     let resp = json!({ "tools": tools });
     serde_json::to_vec(&resp).expect("Failed to serialize tools/list response")
+}
+
+fn enhance_tool_descriptor(tool: &Value) -> Value {
+    let mut tool = tool.clone();
+    let Some(obj) = tool.as_object_mut() else {
+        return tool;
+    };
+    let name = obj
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    obj.entry("title")
+        .or_insert_with(|| Value::String(human_title(&name)));
+    obj.entry("outputSchema")
+        .or_insert_with(|| json!({ "type": "object", "additionalProperties": true }));
+    let is_read = name.starts_with("read")
+        || name.starts_with("list")
+        || name.starts_with("search")
+        || name.starts_with("grep")
+        || matches!(
+            name.as_str(),
+            "get_file_info"
+                | "get_disk_usage"
+                | "hash_file"
+                | "directory_tree"
+                | "generate_key"
+                | "csv_read"
+                | "csv_read_column_values_range"
+                | "csv_read_row_range"
+                | "csv_select_column_range"
+        );
+    let destructive = matches!(
+        name.as_str(),
+        "write_file"
+            | "edit_file"
+            | "move_file"
+            | "delete_file"
+            | "delete_directory"
+            | "set_permissions"
+            | "decompress_tar"
+            | "csv_update_cell"
+            | "csv_remove_row"
+            | "csv_remove_column"
+            | "csv_rename_column"
+    );
+    let idempotent = matches!(
+        name.as_str(),
+        "write_file" | "create_directory" | "set_permissions"
+    );
+    let annotations = obj.entry("annotations").or_insert_with(|| json!({}));
+    if let Some(a) = annotations.as_object_mut() {
+        a.entry("readOnlyHint").or_insert(Value::Bool(is_read));
+        a.entry("openWorldHint").or_insert(Value::Bool(false));
+        a.entry("destructiveHint")
+            .or_insert(Value::Bool(destructive));
+        a.entry("idempotentHint").or_insert(Value::Bool(idempotent));
+    }
+    tool
+}
+
+fn human_title(name: &str) -> String {
+    name.split('_')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 const BUFFER_CAPACITY: usize = 65536;
@@ -134,7 +207,9 @@ fn parse_request(line: &str) -> std::result::Result<JsonRpcRequest, String> {
     if trimmed.is_empty() {
         return Err("Empty request".to_string());
     }
-    serde_json::from_str::<JsonRpcRequest>(trimmed).map_err(|e| e.to_string())
+    serde_json::from_str::<Value>(trimmed)
+        .map_err(|e| MCSError::ParseError(e.to_string()).to_string())
+        .and_then(|v| JsonRpcRequest::from_value(&v).map_err(|e| e.to_string()))
 }
 
 pub struct MCPServer {
@@ -256,6 +331,8 @@ pub async fn process_request(req: &JsonRpcRequest, config: &Config) -> MCSResult
         "initialize" => handle_initialize(req),
         "tools/list" => handle_tools_list(config),
         "tools/call" => handle_tools_call(req, config).await,
+        "prompts/list" => handle_prompts_list(),
+        "resources/list" => handle_resources_list(),
         "ping" => handle_ping(),
         method if method.starts_with("notifications/") => handle_notification(method),
         _ => Err(MCSError::MethodNotFound(req.method.clone())),
@@ -294,7 +371,7 @@ fn timeout_error(config: &Config) -> MCSError {
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 /// Newest revision we implement; offered when the client requests an unknown one.
-const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
+pub const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
 
 /// `instructions` surfaced to the client and appended to the model's system prompt.
 const SERVER_INSTRUCTIONS: &str = "Sandboxed filesystem MCP server. All paths are restricted to the \
@@ -322,7 +399,10 @@ fn handle_initialize(req: &JsonRpcRequest) -> MCSResult<Value> {
         },
         "serverInfo": {
             "name": "mcp-filesystem",
-            "version": env!("CARGO_PKG_VERSION")
+            "version": env!("CARGO_PKG_VERSION"),
+            "homepage": env!("CARGO_PKG_HOMEPAGE"),
+            "repository": env!("CARGO_PKG_REPOSITORY"),
+            "license": env!("CARGO_PKG_LICENSE")
         },
         "instructions": SERVER_INSTRUCTIONS
     }))
@@ -366,6 +446,14 @@ fn tool_error(message: impl Into<String>) -> Value {
         "content": [{ "type": "text", "text": message.into() }],
         "isError": true
     })
+}
+
+fn handle_prompts_list() -> MCSResult<Value> {
+    Ok(json!({ "prompts": [] }))
+}
+
+fn handle_resources_list() -> MCSResult<Value> {
+    Ok(json!({ "resources": [] }))
 }
 
 fn handle_tools_list(config: &Config) -> MCSResult<Value> {

@@ -97,6 +97,8 @@ pub struct ServerConfig {
     pub follow_symlinks: bool,
     /// Max bytes for a single request line on the stdio transport.
     pub max_request_bytes: usize,
+    /// Max bytes for a single HTTP JSON-RPC request body.
+    pub max_http_body_bytes: usize,
     /// Optional bearer token for HTTP authentication.
     pub auth_token: Option<String>,
     /// Tool categories exposed by this server. Empty (the default) means no
@@ -155,6 +157,7 @@ impl Config {
                 access_mode: args.access_mode,
                 follow_symlinks: args.follow_symlinks,
                 max_request_bytes: args.max_request_bytes,
+                max_http_body_bytes: args.max_http_body_bytes,
                 auth_token: args.auth_token.clone(),
                 enabled_categories,
                 tls_cert,
@@ -223,6 +226,7 @@ impl Default for Config {
                 access_mode: AccessMode::Unrestricted,
                 follow_symlinks: false,
                 max_request_bytes: 16 * 1024 * 1024,
+                max_http_body_bytes: 16 * 1024 * 1024,
                 auth_token: None,
                 enabled_categories: Vec::new(),
                 tls_cert: None,

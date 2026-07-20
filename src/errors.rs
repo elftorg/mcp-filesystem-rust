@@ -8,6 +8,9 @@ pub enum MCSError {
     #[error("Method not found: {0}")]
     MethodNotFound(String),
 
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
+
     #[error("Invalid params: {0}")]
     InvalidParams(String),
 
@@ -32,6 +35,7 @@ impl MCSError {
         match self {
             MCSError::ParseError(_) => -32700,
             MCSError::MethodNotFound(_) => -32601,
+            MCSError::InvalidRequest(_) => -32600,
             MCSError::InvalidParams(_) => -32602,
             MCSError::FilesystemError(_) => -32000,
             MCSError::IoError(_) => -32003,
@@ -52,6 +56,7 @@ mod tests {
     fn test_error_codes() {
         assert_eq!(MCSError::ParseError("".into()).error_code(), -32700);
         assert_eq!(MCSError::MethodNotFound("".into()).error_code(), -32601);
+        assert_eq!(MCSError::InvalidRequest("".into()).error_code(), -32600);
         assert_eq!(MCSError::InvalidParams("".into()).error_code(), -32602);
         assert_eq!(MCSError::FilesystemError("".into()).error_code(), -32000);
         assert_eq!(MCSError::PathNotAllowed("".into()).error_code(), -32004);

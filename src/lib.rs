@@ -13,6 +13,7 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(name = "MCP Filesystem Server")]
+#[command(version)]
 #[command(about = "High-performance Model Context Protocol server for filesystem access", long_about = None)]
 pub struct Args {
     /// Directories to allow access to (can specify multiple)
@@ -43,6 +44,10 @@ pub struct Args {
     #[arg(long)]
     pub stdio: bool,
 
+    /// Print a local health payload and exit without starting a transport
+    #[arg(long)]
+    pub health: bool,
+
     /// Access mode: unrestricted or readonly
     #[arg(long, default_value = "unrestricted")]
     pub access_mode: config::AccessMode,
@@ -59,6 +64,10 @@ pub struct Args {
     /// Requests exceeding this are rejected to prevent memory exhaustion.
     #[arg(long, default_value = "16777216")]
     pub max_request_bytes: usize,
+
+    /// Maximum size in bytes of a single HTTP JSON-RPC request body.
+    #[arg(long, default_value = "16777216")]
+    pub max_http_body_bytes: usize,
 
     /// Optional bearer token required to access the HTTP transport.
     /// When unset, the transport is unauthenticated.
