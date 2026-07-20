@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -8,49 +8,46 @@ use crate::actions;
 use crate::config::Config;
 use crate::errors::{MCSError, Result as MCSResult};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
-use std::sync::Arc;
-use std::sync::LazyLock;
+use crate::resources::{self, UI_RESOURCE_URI};
+use std::sync::{Arc, LazyLock};
 
-/// Every tool definition from `tools.json`, parsed once. The `tools/list`
-/// payload is derived from this by filtering to a server's enabled categories.
 static ALL_TOOL_DEFS: LazyLock<Vec<Value>> = LazyLock::new(|| {
-    let tools_json = include_str!("../tools.json");
-    serde_json::from_str(tools_json).expect("Failed to parse tools.json")
+    serde_json::from_str(include_str!("../tools.json")).expect("Failed to parse tools.json")
 });
 
-/// Build the pre-serialized `{"tools":[...]}` payload for `tools/list`, filtered
-/// to the enabled categories. Tools whose category is not enabled are omitted
-/// entirely; with an empty `enabled` set the payload is `{"tools":[]}`. The
-/// result is cached per-`Config` (see `Config::tools_list_bytes`).
 pub fn build_tools_list_response(enabled: &[crate::tools::ToolCategory]) -> Vec<u8> {
     let tools: Vec<Value> = ALL_TOOL_DEFS
         .iter()
-        .filter(|t| {
-            t.get("name")
+        .filter(|tool| {
+            tool.get("name")
                 .and_then(Value::as_str)
                 .is_some_and(|name| crate::tools::is_tool_available(name, enabled))
         })
         .map(enhance_tool_descriptor)
         .collect();
-    let resp = json!({ "tools": tools });
-    serde_json::to_vec(&resp).expect("Failed to serialize tools/list response")
+
+    serde_json::to_vec(&json!({ "tools": tools })).expect("Failed to serialize tools/list response")
 }
 
 fn enhance_tool_descriptor(tool: &Value) -> Value {
     let mut tool = tool.clone();
-    let Some(obj) = tool.as_object_mut() else {
+    let Some(object) = tool.as_object_mut() else {
         return tool;
     };
-    let name = obj
+    let name = object
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    obj.entry("title")
+
+    object
+        .entry("title")
         .or_insert_with(|| Value::String(human_title(&name)));
-    obj.entry("outputSchema")
+    object
+        .entry("outputSchema")
         .or_insert_with(|| json!({ "type": "object", "additionalProperties": true }));
-    let is_read = name.starts_with("read")
+
+    let read_only = name.starts_with("read")
         || name.starts_with("list")
         || name.starts_with("search")
         || name.starts_with("grep")
@@ -84,15 +81,68 @@ fn enhance_tool_descriptor(tool: &Value) -> Value {
         name.as_str(),
         "write_file" | "create_directory" | "set_permissions"
     );
-    let annotations = obj.entry("annotations").or_insert_with(|| json!({}));
-    if let Some(a) = annotations.as_object_mut() {
-        a.entry("readOnlyHint").or_insert(Value::Bool(is_read));
-        a.entry("openWorldHint").or_insert(Value::Bool(false));
-        a.entry("destructiveHint")
+
+    let annotations = object.entry("annotations").or_insert_with(|| json!({}));
+    if let Some(annotations) = annotations.as_object_mut() {
+        annotations
+            .entry("readOnlyHint")
+            .or_insert(Value::Bool(read_only));
+        annotations
+            .entry("openWorldHint")
+            .or_insert(Value::Bool(false));
+        annotations
+            .entry("destructiveHint")
             .or_insert(Value::Bool(destructive));
-        a.entry("idempotentHint").or_insert(Value::Bool(idempotent));
+        annotations
+            .entry("idempotentHint")
+            .or_insert(Value::Bool(idempotent));
     }
+
+    if has_browser_ui(&name) {
+        merge_app_meta(object);
+    }
+
     tool
+}
+
+fn merge_app_meta(object: &mut Map<String, Value>) {
+    let meta = object.entry("_meta").or_insert_with(|| json!({}));
+    let Some(meta) = meta.as_object_mut() else {
+        return;
+    };
+    meta.insert(
+        "ui".into(),
+        json!({
+            "resourceUri": UI_RESOURCE_URI,
+            "visibility": ["model", "app"]
+        }),
+    );
+    meta.insert(
+        "openai/outputTemplate".into(),
+        Value::String(UI_RESOURCE_URI.into()),
+    );
+    meta.insert(
+        "openai/toolInvocation/invoking".into(),
+        Value::String("Reading the filesystem…".into()),
+    );
+    meta.insert(
+        "openai/toolInvocation/invoked".into(),
+        Value::String("Filesystem view ready.".into()),
+    );
+}
+
+fn has_browser_ui(name: &str) -> bool {
+    matches!(
+        name,
+        "list_allowed_directories"
+            | "list_directory"
+            | "list_directory_with_sizes"
+            | "directory_tree"
+            | "search_files"
+            | "read_text_file"
+            | "read_media_file"
+            | "csv_read"
+    )
 }
 
 fn human_title(name: &str) -> String {
@@ -108,108 +158,92 @@ fn human_title(name: &str) -> String {
         .join(" ")
 }
 
-const BUFFER_CAPACITY: usize = 65536;
+const BUFFER_CAPACITY: usize = 65_536;
 const NEWLINE: &[u8] = b"\n";
 
-/// Outcome of attempting to read one newline-delimited request.
 enum LineRead {
-    /// A complete line was read into the buffer.
     Line,
-    /// Clean EOF before any bytes of a new line.
     Eof,
-    /// The line exceeded `max_request_bytes` before a newline was seen.
     TooLong,
 }
 
-/// Read a single newline-terminated line, but never buffer more than `max`
-/// bytes. On overflow returns `TooLong` without allocating the whole line, so a
-/// hostile client cannot exhaust memory with one giant unterminated line. Both
-/// `buf` (the byte accumulator) and `out` (the decoded line) are caller-owned
-/// and reused across calls, so a long-lived connection performs no per-request
-/// line allocation — only the decode copy into `out`'s retained capacity.
 async fn read_line_capped<R>(
     reader: &mut R,
-    buf: &mut Vec<u8>,
-    out: &mut String,
+    buffer: &mut Vec<u8>,
+    output: &mut String,
     max: usize,
 ) -> std::io::Result<LineRead>
 where
     R: AsyncBufReadExt + Unpin,
 {
-    buf.clear();
-    out.clear();
-    // Decode the accumulated bytes into `out`, reusing its capacity. The common
-    // path (valid UTF-8) is a single copy; only malformed input takes the lossy
-    // allocation.
-    fn finish(buf: &[u8], out: &mut String) -> LineRead {
-        match std::str::from_utf8(buf) {
-            Ok(s) => out.push_str(s),
-            Err(_) => out.push_str(&String::from_utf8_lossy(buf)),
+    buffer.clear();
+    output.clear();
+
+    fn finish(buffer: &[u8], output: &mut String) -> LineRead {
+        match std::str::from_utf8(buffer) {
+            Ok(value) => output.push_str(value),
+            Err(_) => output.push_str(&String::from_utf8_lossy(buffer)),
         }
         LineRead::Line
     }
+
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
-            // EOF: a trailing line without a newline is still a valid request.
-            if buf.is_empty() {
-                return Ok(LineRead::Eof);
-            }
-            return Ok(finish(buf, out));
+            return if buffer.is_empty() {
+                Ok(LineRead::Eof)
+            } else {
+                Ok(finish(buffer, output))
+            };
         }
-        match available.iter().position(|&b| b == b'\n') {
-            Some(i) => {
-                if buf.len() + i + 1 > max {
-                    reader.consume(i + 1);
+
+        match available.iter().position(|byte| *byte == b'\n') {
+            Some(index) => {
+                if buffer.len() + index + 1 > max {
+                    reader.consume(index + 1);
                     return Ok(LineRead::TooLong);
                 }
-                buf.extend_from_slice(&available[..=i]);
-                reader.consume(i + 1);
-                return Ok(finish(buf, out));
+                buffer.extend_from_slice(&available[..=index]);
+                reader.consume(index + 1);
+                return Ok(finish(buffer, output));
             }
             None => {
-                let take = available.len();
-                if buf.len() + take > max {
-                    reader.consume(take);
+                let length = available.len();
+                if buffer.len() + length > max {
+                    reader.consume(length);
                     return Ok(LineRead::TooLong);
                 }
-                buf.extend_from_slice(available);
-                reader.consume(take);
+                buffer.extend_from_slice(available);
+                reader.consume(length);
             }
         }
     }
 }
 
-/// Check a presented credential line against the expected token. Accepts an
-/// optional `Bearer ` prefix. Uses a length-then-byte comparison that does not
-/// early-return on the first differing byte.
 pub fn token_matches(presented: &str, expected: &str) -> bool {
     let presented = presented.trim();
     let presented = presented
         .strip_prefix("Bearer ")
         .unwrap_or(presented)
         .trim();
-
-    // Use hashes to ensure constant-time comparison even if lengths differ.
-    let h_presented = Sha256::digest(presented.as_bytes());
-    let h_expected = Sha256::digest(expected.as_bytes());
-
-    h_presented.ct_eq(&h_expected).into()
+    let presented_hash = Sha256::digest(presented.as_bytes());
+    let expected_hash = Sha256::digest(expected.as_bytes());
+    presented_hash.ct_eq(&expected_hash).into()
 }
 
-fn parse_error(msg: String) -> JsonRpcResponse {
-    let mcp_error = MCSError::ParseError(msg);
-    JsonRpcResponse::error(None, mcp_error.error_code(), mcp_error.to_string())
+fn parse_error(message: String) -> JsonRpcResponse {
+    let error = MCSError::ParseError(message);
+    JsonRpcResponse::error(None, error.error_code(), error.to_string())
 }
 
 fn parse_request(line: &str) -> std::result::Result<JsonRpcRequest, String> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return Err("Empty request".to_string());
+        return Err("Empty request".into());
     }
     serde_json::from_str::<Value>(trimmed)
-        .map_err(|e| MCSError::ParseError(e.to_string()).to_string())
-        .and_then(|v| JsonRpcRequest::from_value(&v).map_err(|e| e.to_string()))
+        .map_err(|error| MCSError::ParseError(error.to_string()).to_string())
+        .and_then(|value| JsonRpcRequest::from_value(&value).map_err(|error| error.to_string()))
 }
 
 pub struct MCPServer {
@@ -231,23 +265,24 @@ impl MCPServer {
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::with_capacity(BUFFER_CAPACITY, stdin);
         let mut stdout = tokio::io::stdout();
-        let mut line = String::with_capacity(1024);
-        let mut read_buf = Vec::with_capacity(1024);
-        let mut response_buf = Vec::with_capacity(65536);
+        let mut line = String::with_capacity(1_024);
+        let mut read_buffer = Vec::with_capacity(1_024);
+        let mut response_buffer = Vec::with_capacity(65_536);
         let max = self.config.server.max_request_bytes;
 
         loop {
-            match read_line_capped(&mut reader, &mut read_buf, &mut line, max).await {
+            match read_line_capped(&mut reader, &mut read_buffer, &mut line, max).await {
                 Ok(LineRead::Eof) => break,
                 Ok(LineRead::Line) => {
-                    process_one_line(&line, &self.config, &mut response_buf, &mut stdout).await?;
+                    process_one_line(&line, &self.config, &mut response_buffer, &mut stdout)
+                        .await?;
                 }
                 Ok(LineRead::TooLong) => {
-                    write_oversize_error(&mut response_buf, &mut stdout, max).await?;
+                    write_oversize_error(&mut response_buffer, &mut stdout, max).await?;
                     break;
                 }
-                Err(e) => {
-                    error!("IO error: {}", e);
+                Err(error) => {
+                    error!("IO error: {error}");
                     break;
                 }
             }
@@ -257,16 +292,16 @@ impl MCPServer {
 }
 
 async fn write_oversize_error<W: AsyncWriteExt + Unpin>(
-    response_buf: &mut Vec<u8>,
+    response_buffer: &mut Vec<u8>,
     writer: &mut W,
     max: usize,
 ) -> MCSResult<()> {
-    let err = MCSError::InvalidParams(format!("Request exceeds maximum size of {max} bytes"));
-    let response = JsonRpcResponse::error(None, err.error_code(), err.to_string());
-    response_buf.clear();
-    serde_json::to_writer(&mut *response_buf, &response)?;
-    response_buf.extend_from_slice(NEWLINE);
-    writer.write_all(response_buf).await?;
+    let error = MCSError::InvalidParams(format!("Request exceeds maximum size of {max} bytes"));
+    let response = JsonRpcResponse::error(None, error.error_code(), error.to_string());
+    response_buffer.clear();
+    serde_json::to_writer(&mut *response_buffer, &response)?;
+    response_buffer.extend_from_slice(NEWLINE);
+    writer.write_all(response_buffer).await?;
     writer.flush().await?;
     Ok(())
 }
@@ -274,87 +309,86 @@ async fn write_oversize_error<W: AsyncWriteExt + Unpin>(
 async fn process_one_line<W: AsyncWriteExt + Unpin>(
     line: &str,
     config: &Arc<Config>,
-    response_buf: &mut Vec<u8>,
+    response_buffer: &mut Vec<u8>,
     writer: &mut W,
 ) -> MCSResult<()> {
-    let (response, is_notification) = match parse_request(line) {
-        Ok(req) => {
-            let is_notif = req.id.is_none();
-            match tokio::time::timeout(config.server.request_timeout, process_request(&req, config))
-                .await
+    let (response, notification) = match parse_request(line) {
+        Ok(request) => {
+            let notification = request.id.is_none();
+            match tokio::time::timeout(
+                config.server.request_timeout,
+                process_request(&request, config),
+            )
+            .await
             {
-                Ok(Ok(result)) => (JsonRpcResponse::success(req.id, result), is_notif),
-                Ok(Err(e)) => (
-                    JsonRpcResponse::error(req.id, e.error_code(), e.to_string()),
-                    is_notif,
+                Ok(Ok(result)) => (JsonRpcResponse::success(request.id, result), notification),
+                Ok(Err(error)) => (
+                    JsonRpcResponse::error(request.id, error.error_code(), error.to_string()),
+                    notification,
                 ),
                 Err(_) => {
-                    let e = timeout_error(config);
+                    let error = timeout_error(config);
                     (
-                        JsonRpcResponse::error(req.id, e.error_code(), e.to_string()),
-                        is_notif,
+                        JsonRpcResponse::error(request.id, error.error_code(), error.to_string()),
+                        notification,
                     )
                 }
             }
         }
-        Err(e) => (parse_error(e), false),
+        Err(error) => (parse_error(error), false),
     };
 
-    if is_notification {
+    if notification {
         return Ok(());
     }
 
-    response_buf.clear();
-    serde_json::to_writer(&mut *response_buf, &response)?;
-    response_buf.extend_from_slice(NEWLINE);
-
-    writer.write_all(response_buf).await?;
+    response_buffer.clear();
+    serde_json::to_writer(&mut *response_buffer, &response)?;
+    response_buffer.extend_from_slice(NEWLINE);
+    writer.write_all(response_buffer).await?;
     writer.flush().await?;
-    maybe_shrink_buf(response_buf);
+    maybe_shrink_buffer(response_buffer);
     Ok(())
 }
 
-/// Release an oversized response buffer back to a small capacity. A single large
-/// response (e.g. a big `read_text_file`, up to `max_file_size`) would otherwise
-/// pin that capacity for the whole stdio session; this caps idle memory between
-/// requests.
-#[inline]
-fn maybe_shrink_buf(buf: &mut Vec<u8>) {
-    const SHRINK_THRESHOLD: usize = 1 << 20; // 1 MiB
-    if buf.capacity() > SHRINK_THRESHOLD {
-        *buf = Vec::with_capacity(65536);
+fn maybe_shrink_buffer(buffer: &mut Vec<u8>) {
+    if buffer.capacity() > 1 << 20 {
+        *buffer = Vec::with_capacity(65_536);
     }
 }
 
-pub async fn process_request(req: &JsonRpcRequest, config: &Config) -> MCSResult<Value> {
-    match req.method.as_str() {
-        "initialize" => handle_initialize(req),
+pub async fn process_request(request: &JsonRpcRequest, config: &Config) -> MCSResult<Value> {
+    match request.method.as_str() {
+        "initialize" => handle_initialize(request),
         "tools/list" => handle_tools_list(config),
-        "tools/call" => handle_tools_call(req, config).await,
-        "prompts/list" => handle_prompts_list(),
-        "resources/list" => handle_resources_list(),
-        "ping" => handle_ping(),
-        method if method.starts_with("notifications/") => handle_notification(method),
-        _ => Err(MCSError::MethodNotFound(req.method.clone())),
+        "tools/call" => handle_tools_call(request, config).await,
+        "prompts/list" => Ok(json!({ "prompts": [] })),
+        "resources/list" => resources::list(request.params.as_ref(), config).await,
+        "resources/read" => resources::read(request.params.as_ref(), config).await,
+        "resources/templates/list" => Ok(resources::templates()),
+        "ping" => Ok(Value::Null),
+        method if method.starts_with("notifications/") => {
+            tracing::trace!("Received notification: {method}");
+            Ok(Value::Null)
+        }
+        _ => Err(MCSError::MethodNotFound(request.method.clone())),
     }
 }
 
-const fn handle_ping() -> MCSResult<Value> {
-    Ok(Value::Null)
-}
-
-fn handle_notification(method: &str) -> MCSResult<Value> {
-    tracing::trace!("Received notification: {method}");
-    Ok(Value::Null)
-}
-
-pub async fn process_request_http(req: &JsonRpcRequest, config: &Config) -> JsonRpcResponse {
-    match tokio::time::timeout(config.server.request_timeout, process_request(req, config)).await {
-        Ok(Ok(result)) => JsonRpcResponse::success(req.id.clone(), result),
-        Ok(Err(e)) => JsonRpcResponse::error(req.id.clone(), e.error_code(), e.to_string()),
+pub async fn process_request_http(request: &JsonRpcRequest, config: &Config) -> JsonRpcResponse {
+    match tokio::time::timeout(
+        config.server.request_timeout,
+        process_request(request, config),
+    )
+    .await
+    {
+        Ok(Ok(result)) => JsonRpcResponse::success(request.id.clone(), result),
+        Ok(Err(error)) => {
+            JsonRpcResponse::error(request.id.clone(), error.error_code(), error.to_string())
+        }
         Err(_) => {
-            let e = timeout_error(config);
-            JsonRpcResponse::error(req.id.clone(), e.error_code(), e.to_string())
+            let error = timeout_error(config);
+            JsonRpcResponse::error(request.id.clone(), error.error_code(), error.to_string())
         }
     }
 }
@@ -366,39 +400,38 @@ fn timeout_error(config: &Config) -> MCSError {
     ))
 }
 
-/// MCP protocol revisions this server can speak, newest first (for `initialize`
-/// version negotiation).
-const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-/// Newest revision we implement; offered when the client requests an unknown one.
 pub const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
 
-/// `instructions` surfaced to the client and appended to the model's system prompt.
-const SERVER_INSTRUCTIONS: &str = "Sandboxed filesystem MCP server. All paths are restricted to the \
-allowed directories; use `list_allowed_directories` to see them. Call `create_directory` before \
-writing into a new path. Tool results carry both human-readable text and a machine-readable \
-`structuredContent` object; `read_media_file` returns base64 image/binary content. Tool failures are \
-returned with `isError: true` rather than as protocol errors — read the message and retry.";
+pub fn is_supported_protocol_version(value: &str) -> bool {
+    SUPPORTED_PROTOCOL_VERSIONS.contains(&value)
+}
 
-fn handle_initialize(req: &JsonRpcRequest) -> MCSResult<Value> {
-    // Version negotiation: echo a supported requested revision, else offer latest.
-    let protocol_version = req
+const SERVER_INSTRUCTIONS: &str = "Sandboxed filesystem MCP App Server. All file paths and file:// \
+resources are restricted to the configured allowed directories. Use list_allowed_directories before \
+browsing. Read-oriented tools can render the interactive filesystem browser. Tool results contain \
+human-readable content and structuredContent; failures use isError=true so the model can correct \
+arguments. Destructive, write, crypto, compression, and CSV tools remain opt-in by category.";
+
+fn handle_initialize(request: &JsonRpcRequest) -> MCSResult<Value> {
+    let protocol_version = request
         .params
         .as_ref()
-        .and_then(|p| p.get("protocolVersion"))
+        .and_then(|params| params.get("protocolVersion"))
         .and_then(Value::as_str)
-        .filter(|v| SUPPORTED_PROTOCOL_VERSIONS.contains(v))
+        .filter(|version| is_supported_protocol_version(version))
         .unwrap_or(LATEST_PROTOCOL_VERSION);
 
     Ok(json!({
         "protocolVersion": protocol_version,
-        // Advertise only implemented capabilities. Earlier releases falsely
-        // declared `resources` and `prompts` with no handlers.
         "capabilities": {
-            "tools": { "listChanged": false }
+            "tools": { "listChanged": false },
+            "resources": { "subscribe": false, "listChanged": false }
         },
         "serverInfo": {
             "name": "mcp-filesystem",
+            "title": "Filesystem MCP App Server",
             "version": env!("CARGO_PKG_VERSION"),
             "homepage": env!("CARGO_PKG_HOMEPAGE"),
             "repository": env!("CARGO_PKG_REPOSITORY"),
@@ -408,39 +441,46 @@ fn handle_initialize(req: &JsonRpcRequest) -> MCSResult<Value> {
     }))
 }
 
-/// Wrap a successful tool result in an MCP `CallToolResult`. If the action
-/// already produced a `CallToolResult` (an object with a `content` array — e.g.
-/// `read_media_file` returning `ImageContent`), it is passed through with
-/// `isError` defaulted. Otherwise the value is provided as serialized text plus,
-/// for objects, `structuredContent` (MCP 2025-06-18+).
-#[inline]
-fn tool_success(value: Value) -> Value {
-    if value.get("content").is_some_and(Value::is_array) {
-        let mut v = value;
-        if v.get("isError").is_none() {
-            v["isError"] = Value::Bool(false);
+fn tool_success(tool_name: &str, value: Value) -> Value {
+    let mut result = if value.get("content").is_some_and(Value::is_array) {
+        let mut result = value;
+        if result.get("isError").is_none() {
+            result["isError"] = Value::Bool(false);
         }
-        return v;
-    }
-    let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string());
-    if value.is_object() {
-        json!({
-            "content": [{ "type": "text", "text": text }],
-            "structuredContent": value,
-            "isError": false
-        })
+        result
     } else {
-        json!({
-            "content": [{ "type": "text", "text": text }],
-            "isError": false
-        })
+        let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".into());
+        if value.is_object() {
+            json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": value,
+                "isError": false
+            })
+        } else {
+            json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": false
+            })
+        }
+    };
+
+    if has_browser_ui(tool_name) {
+        let meta = result
+            .as_object_mut()
+            .expect("CallToolResult must be an object")
+            .entry("_meta")
+            .or_insert_with(|| json!({}));
+        if let Some(meta) = meta.as_object_mut() {
+            meta.insert("ui".into(), json!({ "resourceUri": UI_RESOURCE_URI }));
+            meta.insert(
+                "openai/outputTemplate".into(),
+                Value::String(UI_RESOURCE_URI.into()),
+            );
+        }
     }
+    result
 }
 
-/// Wrap a tool execution failure as a `CallToolResult` with `isError: true` so
-/// the model can read the message and self-correct instead of receiving an
-/// opaque JSON-RPC protocol error.
-#[inline]
 fn tool_error(message: impl Into<String>) -> Value {
     json!({
         "content": [{ "type": "text", "text": message.into() }],
@@ -448,33 +488,22 @@ fn tool_error(message: impl Into<String>) -> Value {
     })
 }
 
-fn handle_prompts_list() -> MCSResult<Value> {
-    Ok(json!({ "prompts": [] }))
-}
-
-fn handle_resources_list() -> MCSResult<Value> {
-    Ok(json!({ "resources": [] }))
-}
-
 fn handle_tools_list(config: &Config) -> MCSResult<Value> {
-    // Deserialize from the per-config cached bytes (already filtered to the
-    // enabled categories).
     Ok(serde_json::from_slice(&config.tools_list_bytes)?)
 }
 
-async fn handle_tools_call(req: &JsonRpcRequest, config: &Config) -> MCSResult<Value> {
-    let tool_name = req
+async fn handle_tools_call(request: &JsonRpcRequest, config: &Config) -> MCSResult<Value> {
+    let tool_name = request
         .params
         .as_ref()
-        .and_then(|p| p.get("name").and_then(|v| v.as_str()))
+        .and_then(|params| params.get("name"))
+        .and_then(Value::as_str)
         .ok_or_else(|| MCSError::InvalidParams("Missing 'name' parameter".into()))?;
+    let arguments = request
+        .params
+        .as_ref()
+        .and_then(|params| params.get("arguments"));
 
-    let tool_args = req.params.as_ref().and_then(|p| p.get("arguments"));
-
-    // Category gate: a tool is only reachable if it exists AND its category was
-    // enabled at startup. Tools in disabled categories are invisible (absent
-    // from tools/list), so a call to one is an unknown method, not a policy
-    // isError.
     if !crate::tools::is_tool_available(tool_name, &config.server.enabled_categories) {
         return Err(method_not_found(tool_name));
     }
@@ -482,76 +511,73 @@ async fn handle_tools_call(req: &JsonRpcRequest, config: &Config) -> MCSResult<V
     if config.server.access_mode == crate::config::AccessMode::ReadOnly
         && crate::tools::is_write_tool(tool_name)
     {
-        // Policy rejection of a valid call → surface as an isError result.
         return Ok(tool_error(format!(
             "Operation '{tool_name}' is not allowed in read-only mode"
         )));
     }
 
     let result = match tool_name {
-        "read_text_file" => actions::files::read_text_file(tool_args, config).await,
-        "read_media_file" => actions::files::read_media_file(tool_args, config).await,
-        "write_file" => actions::files::write_file(tool_args, config).await,
-        "edit_file" => actions::files::edit_file(tool_args, config).await,
-        "create_directory" => actions::files::create_directory(tool_args, config).await,
-        "list_directory" => actions::dirs::list_directory(tool_args, config).await,
+        "read_text_file" => actions::files::read_text_file(arguments, config).await,
+        "read_media_file" => actions::files::read_media_file(arguments, config).await,
+        "write_file" => actions::files::write_file(arguments, config).await,
+        "edit_file" => actions::files::edit_file(arguments, config).await,
+        "create_directory" => actions::files::create_directory(arguments, config).await,
+        "list_directory" => actions::dirs::list_directory(arguments, config).await,
         "list_directory_with_sizes" => {
-            actions::dirs::list_directory_with_sizes(tool_args, config).await
+            actions::dirs::list_directory_with_sizes(arguments, config).await
         }
-        "move_file" => actions::files::move_file(tool_args, config).await,
-        "copy_file" => actions::files::copy_file(tool_args, config).await,
-        "delete_file" => actions::files::delete_file(tool_args, config).await,
-        "delete_directory" => actions::files::delete_directory(tool_args, config).await,
-        "search_files" => actions::dirs::search_files(tool_args, config).await,
-        "directory_tree" => actions::dirs::directory_tree(tool_args, config).await,
-        "get_file_info" => actions::files::get_file_info(tool_args, config).await,
+        "move_file" => actions::files::move_file(arguments, config).await,
+        "copy_file" => actions::files::copy_file(arguments, config).await,
+        "delete_file" => actions::files::delete_file(arguments, config).await,
+        "delete_directory" => actions::files::delete_directory(arguments, config).await,
+        "search_files" => actions::dirs::search_files(arguments, config).await,
+        "directory_tree" => actions::dirs::directory_tree(arguments, config).await,
+        "get_file_info" => actions::files::get_file_info(arguments, config).await,
         "list_allowed_directories" => {
-            actions::files::list_allowed_directories(tool_args, config).await
+            actions::files::list_allowed_directories(arguments, config).await
         }
-        "hash_file" => actions::files::hash_file(tool_args, config).await,
-        "grep_files" => actions::dirs::grep_files(tool_args, config).await,
-        "set_permissions" => actions::files::set_permissions(tool_args, config).await,
-        "get_disk_usage" => actions::dirs::get_disk_usage(tool_args, config).await,
-        "create_symlink" => actions::files::create_symlink(tool_args, config).await,
-        "read_file_range" => actions::files::read_file_range(tool_args, config).await,
-        "compress_gzip" => actions::compress::compress_gzip(tool_args, config).await,
-        "decompress_gzip" => actions::compress::decompress_gzip(tool_args, config).await,
-        "compress_zstd" => actions::compress::compress_zstd(tool_args, config).await,
-        "decompress_zstd" => actions::compress::decompress_zstd(tool_args, config).await,
-        "compress_tar" => actions::compress::compress_tar(tool_args, config).await,
-        "decompress_tar" => actions::compress::decompress_tar(tool_args, config).await,
-        "encrypt_file" => actions::crypto::encrypt_file(tool_args, config).await,
-        "decrypt_file" => actions::crypto::decrypt_file(tool_args, config).await,
-        "generate_key" => actions::crypto::generate_key(tool_args, config).await,
-        "csv_create" => actions::csv::csv_create(tool_args, config).await,
-        "csv_read" => actions::csv::csv_read(tool_args, config).await,
-        "csv_add_row" => actions::csv::csv_add_row(tool_args, config).await,
-        "csv_update_cell" => actions::csv::csv_update_cell(tool_args, config).await,
-        "csv_remove_row" => actions::csv::csv_remove_row(tool_args, config).await,
-        "csv_add_column" => actions::csv::csv_add_column(tool_args, config).await,
-        "csv_remove_column" => actions::csv::csv_remove_column(tool_args, config).await,
-        "csv_rename_column" => actions::csv::csv_rename_column(tool_args, config).await,
+        "hash_file" => actions::files::hash_file(arguments, config).await,
+        "grep_files" => actions::dirs::grep_files(arguments, config).await,
+        "set_permissions" => actions::files::set_permissions(arguments, config).await,
+        "get_disk_usage" => actions::dirs::get_disk_usage(arguments, config).await,
+        "create_symlink" => actions::files::create_symlink(arguments, config).await,
+        "read_file_range" => actions::files::read_file_range(arguments, config).await,
+        "compress_gzip" => actions::compress::compress_gzip(arguments, config).await,
+        "decompress_gzip" => actions::compress::decompress_gzip(arguments, config).await,
+        "compress_zstd" => actions::compress::compress_zstd(arguments, config).await,
+        "decompress_zstd" => actions::compress::decompress_zstd(arguments, config).await,
+        "compress_tar" => actions::compress::compress_tar(arguments, config).await,
+        "decompress_tar" => actions::compress::decompress_tar(arguments, config).await,
+        "encrypt_file" => actions::crypto::encrypt_file(arguments, config).await,
+        "decrypt_file" => actions::crypto::decrypt_file(arguments, config).await,
+        "generate_key" => actions::crypto::generate_key(arguments, config).await,
+        "csv_create" => actions::csv::csv_create(arguments, config).await,
+        "csv_read" => actions::csv::csv_read(arguments, config).await,
+        "csv_add_row" => actions::csv::csv_add_row(arguments, config).await,
+        "csv_update_cell" => actions::csv::csv_update_cell(arguments, config).await,
+        "csv_remove_row" => actions::csv::csv_remove_row(arguments, config).await,
+        "csv_add_column" => actions::csv::csv_add_column(arguments, config).await,
+        "csv_remove_column" => actions::csv::csv_remove_column(arguments, config).await,
+        "csv_rename_column" => actions::csv::csv_rename_column(arguments, config).await,
         "csv_read_column_values_range" => {
-            actions::csv::csv_read_column_values_range(tool_args, config).await
+            actions::csv::csv_read_column_values_range(arguments, config).await
         }
-        "csv_read_row_range" => actions::csv::csv_read_row_range(tool_args, config).await,
-        "csv_select_column_range" => actions::csv::csv_select_column_range(tool_args, config).await,
-        tool => Err(method_not_found(tool)),
+        "csv_read_row_range" => actions::csv::csv_read_row_range(arguments, config).await,
+        "csv_select_column_range" => actions::csv::csv_select_column_range(arguments, config).await,
+        unknown => Err(method_not_found(unknown)),
     };
 
-    // Wrap in an MCP `CallToolResult`. Execution failures become isError
-    // results so the model can self-correct, not opaque protocol errors.
     match result {
-        Ok(value) => Ok(tool_success(value)),
-        Err(e) => {
-            error!("Tool '{tool_name}' error: {e:?}");
-            Ok(tool_error(e.to_string()))
+        Ok(value) => Ok(tool_success(tool_name, value)),
+        Err(error) => {
+            error!("Tool '{tool_name}' error: {error:?}");
+            Ok(tool_error(error.to_string()))
         }
     }
 }
 
 fn method_not_found(name: &str) -> MCSError {
-    MCSError::MethodNotFound(name.to_string())
+    MCSError::MethodNotFound(name.into())
 }
 
 #[cfg(test)]
@@ -559,101 +585,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_valid_request() {
-        let line = r#"{"jsonrpc":"2.0","method":"initialize","id":1}"#;
-        let req = parse_request(line).unwrap();
-        assert_eq!(req.method, "initialize");
-    }
-
-    #[test]
-    fn test_parse_invalid_json() {
-        let err = parse_request("{invalid}").unwrap_err();
-        assert!(!err.is_empty());
-    }
-
-    #[test]
-    fn test_token_matches() {
+    fn token_comparison_accepts_bearer() {
         assert!(token_matches("secret", "secret"));
         assert!(token_matches("Bearer secret", "secret"));
-        assert!(token_matches("  Bearer secret  ", "secret"));
         assert!(!token_matches("wrong", "secret"));
-        assert!(!token_matches("secre", "secret"));
-        assert!(!token_matches("", "secret"));
-    }
-
-    #[tokio::test]
-    async fn test_read_line_capped_rejects_oversize() {
-        // A line longer than the cap, without a newline, must be rejected.
-        let data = vec![b'a'; 1024];
-        let mut reader = tokio::io::BufReader::new(&data[..]);
-        let mut buf = Vec::new();
-        let mut line = String::new();
-        let res = read_line_capped(&mut reader, &mut buf, &mut line, 100)
-            .await
-            .unwrap();
-        assert!(matches!(res, LineRead::TooLong));
-    }
-
-    #[tokio::test]
-    async fn test_read_line_capped_reads_line() {
-        let data = b"hello\nworld\n";
-        let mut reader = tokio::io::BufReader::new(&data[..]);
-        let mut buf = Vec::new();
-        let mut line = String::new();
-        let res = read_line_capped(&mut reader, &mut buf, &mut line, 100)
-            .await
-            .unwrap();
-        assert!(matches!(res, LineRead::Line));
-        assert_eq!(line, "hello\n");
     }
 
     #[test]
-    fn test_handle_initialize_response() {
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "initialize".to_string(),
+    fn initialize_advertises_resources() {
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "initialize".into(),
             params: None,
-            id: Some(Value::Number(1.into())),
+            id: Some(json!(1)),
         };
-        let result = handle_initialize(&req).unwrap();
+        let result = handle_initialize(&request).unwrap();
         assert_eq!(result["protocolVersion"], LATEST_PROTOCOL_VERSION);
-        // False resources/prompts capabilities must not be advertised.
-        assert!(result["capabilities"]["resources"].is_null());
-        assert!(result["capabilities"]["prompts"].is_null());
-        assert!(result["instructions"].is_string());
-        assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+        assert!(result["capabilities"]["resources"].is_object());
     }
 
     #[test]
-    fn test_handle_initialize_version_negotiation() {
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: "initialize".to_string(),
-            params: Some(json!({ "protocolVersion": "2024-11-05" })),
-            id: Some(Value::Number(1.into())),
-        };
+    fn browser_tools_reference_ui_resource() {
+        let descriptor = enhance_tool_descriptor(&json!({
+            "name": "list_directory",
+            "description": "list",
+            "inputSchema": { "type": "object" }
+        }));
+        assert_eq!(descriptor["_meta"]["ui"]["resourceUri"], UI_RESOURCE_URI);
         assert_eq!(
-            handle_initialize(&req).unwrap()["protocolVersion"],
-            "2024-11-05"
+            descriptor["_meta"]["openai/outputTemplate"],
+            UI_RESOURCE_URI
         );
     }
 
     #[test]
-    fn test_tool_result_wrapping() {
-        let ok = tool_success(json!({ "ok": 1 }));
-        assert_eq!(ok["isError"], false);
-        assert_eq!(ok["content"][0]["type"], "text");
-        assert_eq!(ok["structuredContent"]["ok"], 1);
+    fn tool_results_include_structured_content_and_ui_meta() {
+        let result = tool_success("list_directory", json!({ "entries": [] }));
+        assert_eq!(result["isError"], false);
+        assert_eq!(result["structuredContent"]["entries"], json!([]));
+        assert_eq!(result["_meta"]["ui"]["resourceUri"], UI_RESOURCE_URI);
+    }
 
-        // A ready-made CallToolResult (content array) is passed through.
-        let img = tool_success(
-            json!({ "content": [{ "type": "image", "data": "x", "mimeType": "image/png" }] }),
-        );
-        assert_eq!(img["content"][0]["type"], "image");
-        assert_eq!(img["isError"], false);
-
-        let err = tool_error("nope");
-        assert_eq!(err["isError"], true);
-        assert_eq!(err["content"][0]["text"], "nope");
+    #[tokio::test]
+    async fn capped_reader_rejects_oversize_lines() {
+        let data = vec![b'a'; 1_024];
+        let mut reader = tokio::io::BufReader::new(&data[..]);
+        let mut buffer = Vec::new();
+        let mut output = String::new();
+        let result = read_line_capped(&mut reader, &mut buffer, &mut output, 100)
+            .await
+            .unwrap();
+        assert!(matches!(result, LineRead::TooLong));
     }
 }

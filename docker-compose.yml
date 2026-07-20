@@ -1,0 +1,38 @@
+services:
+  mcp-filesystem:
+    build:
+      context: .
+    image: mcp-filesystem-app:local
+    restart: unless-stopped
+    ports:
+      - "${MCP_PORT:-3001}:3001"
+    environment:
+      RUST_LOG: "${RUST_LOG:-info}"
+      MCP_ALLOWED_ORIGINS: "${MCP_ALLOWED_ORIGINS:-}"
+    command:
+      - --directories
+      - /data
+      - --host
+      - 0.0.0.0
+      - --http-port
+      - "3001"
+      - --access-mode
+      - readonly
+      - --enable-read
+      - --auth-token
+      - "${MCP_AUTH_TOKEN:?Set MCP_AUTH_TOKEN in .env}"
+    volumes:
+      - "${MCP_DATA_PATH:-./data}:/data:ro"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

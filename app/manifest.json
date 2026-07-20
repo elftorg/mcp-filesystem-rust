@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0",
+  "name": "Filesystem",
+  "title": "Filesystem Browser",
+  "description": "Browse and preview files that are explicitly exposed by a sandboxed MCP filesystem server.",
+  "mcp": {
+    "endpoint": "${APP_BASE_URL}/mcp",
+    "transport": "streamable-http",
+    "protocol_version": "2025-11-25"
+  },
+  "ui": {
+    "resource_uri": "ui://filesystem/browser-v1.html",
+    "mime_type": "text/html;profile=mcp-app"
+  },
+  "permissions": [
+    {
+      "scope": "filesystem.read",
+      "description": "List, search, inspect, and preview files in the user's sandbox."
+    },
+    {
+      "scope": "filesystem.write",
+      "description": "Create or modify files when write tools are enabled."
+    },
+    {
+      "scope": "filesystem.admin",
+      "description": "Use destructive, permission, compression, or cryptographic tools when separately enabled."
+    }
+  ],
+  "authentication": {
+    "mvp": "none-or-static-bearer",
+    "production_target": "oauth2-authorization-code-pkce",
+    "authorization_endpoint": "${APP_BASE_URL}/authorize",
+    "token_endpoint": "${APP_BASE_URL}/token",
+    "protected_resource_metadata": "${APP_BASE_URL}/.well-known/oauth-protected-resource"
+  },
+  "security": {
+    "sandboxed_filesystem": true,
+    "symlink_following_default": false,
+    "destructive_tools_default": false
+  }
+}

@@ -1,338 +1,346 @@
-# mcp-filesystem
+# MCP Filesystem Server (Rust)
 
-[![Crates.io](https://img.shields.io/crates/v/mcp-filesystem.svg)](https://crates.io/crates/mcp-filesystem)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+A high-performance, sandboxed Model Context Protocol server for filesystem
+operations. It supports stdio, legacy JSON-RPC HTTP, MCP Streamable HTTP,
+filesystem Resources, and an MCP Apps UI for ChatGPT.
 
-A high-performance [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server for filesystem access, written in Rust on the Tokio async runtime.
+## Status
 
-It exposes a rich set of filesystem tools — reads, writes, edits, search, hashing, compression, encryption, and CSV manipulation — over **stdio** and **HTTP** (`POST /rpc`) transports, all behind a strict path sandbox.
+This repository exposes 41 tools across opt-in categories and keeps the
+original MCP contracts intact. The `codex/chatgpt-apps-sdk` branch adds the
+MVP-1 Apps layer:
 
-> **Tools are opt-in (2.2.0+).** No tools are exposed by default. Enable them one
-> *category* at a time with `--enable-<category>` flags (or `--enable-all`). A
-> server started with no enable flags advertises an **empty** tool list. See
-> [Tool Exposure](#tool-exposure-opt-in-by-category).
+- `POST /mcp` and `GET /mcp`;
+- JSON and Server-Sent Events;
+- `MCP-Session-Id` lifecycle;
+- `resources/list`, `resources/read`, `resources/templates/list`;
+- `file://` resources with MIME, size, preview and modification time;
+- `ui://filesystem/browser-v1.html`;
+- interactive file browser and preview component;
+- Docker/Compose deployment templates.
 
-> **TCP removed (2.2.0+).** The line-delimited TCP transport has been dropped;
-> use **stdio** (for MCP clients) or **HTTP**.
-
-> **MCP suite.** One of four high-performance MCP servers written in Rust —
-> [mcp-postgres](https://github.com/corporatepiyush/mcp-pg-rust) ·
-> [mcp-filesystem](https://github.com/corporatepiyush/mcp-filesystem-rust) ·
-> [mcp-memory](https://github.com/corporatepiyush/mcp-memory) ·
-> [mcp-web-search](https://github.com/corporatepiyush/mcp-web-search).
-> All implement MCP protocol revision **`2025-11-25`**.
+OAuth, per-user sandbox roots and audit logging are specified for MVP-2 in
+[`docs/oauth.md`](docs/oauth.md), but are not claimed as implemented.
 
 ## Features
 
-- **Parallel async I/O** built on Tokio with the `mimalloc` allocator and zero-copy memory-mapped reads.
-- **Secure path sandboxing** — every path is validated against an allow-list (via a `PathTrie`) with symlink-escape protection.
-- **Two transports** — stdio (for MCP clients) and an HTTP JSON-RPC endpoint (`POST /rpc`, `GET /health`).
-- **Access modes** — `unrestricted` or `readonly` (write tools are rejected in readonly mode).
-- **41 tools**, including:
-  - **Files**: read/write/edit, copy/move/delete, directory listing & trees, metadata, permissions, disk usage, symlinks, ranged reads.
-  - **Search**: glob `search_files` and content `grep_files`.
-  - **Hashing**: SHA-256, SHA-512, BLAKE3, MD5.
-  - **Compression**: gzip, zstd, and tar archives.
-  - **Encryption**: AES-256-GCM, ChaCha20-Poly1305, and post-quantum ML-KEM-768/1024 (NIST FIPS 203); plus key generation.
-  - **CSV**: create/read and row/column/cell manipulation with ranged reads.
-- **Media detection** via content inspection and magic-byte sniffing.
+- Rust stable, Tokio async runtime and Axum.
+- MCP JSON-RPC 2.0 with protocol negotiation through `2025-11-25`.
+- stdio transport for desktop/local MCP hosts.
+- Streamable HTTP transport at `/mcp`.
+- Backward-compatible `POST /rpc`.
+- `structuredContent`, typed media content and tool annotations.
+- MCP Resources for files and the Apps UI component.
+- Capability-backed sandbox built on `cap_std`.
+- Canonical allow-list checks and symlink rejection by default.
+- Read-only policy and explicit tool category gates.
+- Request, file and decompression size limits.
+- Optional static bearer token and in-process rustls TLS.
+- IPv4 and IPv6 bind support.
+- Health and diagnostics endpoints.
 
-## Installation
+## Quick start
 
-From [crates.io](https://crates.io/crates/mcp-filesystem):
-
-```sh
-cargo install mcp-filesystem
-```
-
-From Homebrew (macOS):
-
-```sh
-brew tap corporatepiyush/mcp-filesystem
-brew install mcp-filesystem
-```
-
-> The Homebrew formula lives in [`homebrew-mcp-filesystem/`](homebrew-mcp-filesystem/). See its
-> [README](homebrew-mcp-filesystem/README.md) for tapping from a local checkout or a dedicated tap repository.
-
-Or build from source:
-
-```sh
-git clone https://github.com/corporatepiyush/mcp-filesystem-rust
-cd mcp-filesystem-rust
+```bash
 cargo build --release
+./target/release/mcp-filesystem \
+  --directories /srv/files \
+  --enable-read
 ```
 
-## Usage
+The HTTP server listens on `127.0.0.1:3001` by default.
 
-Tools are opt-in — pass one or more `--enable-<category>` flags (or
-`--enable-all`). Without them the server exposes no tools.
+### stdio
 
-### stdio mode (for MCP clients)
-
-```sh
-mcp-filesystem --stdio --directories /path/to/allowed/dir --enable-read --enable-write
+```bash
+mcp-filesystem \
+  --stdio \
+  --directories /srv/files \
+  --enable-read
 ```
 
-### HTTP mode
+### Private HTTP deployment
 
-```sh
-mcp-filesystem --directories /path/to/allowed/dir --host 127.0.0.1 --http-port 3001 --enable-all
+```bash
+mcp-filesystem \
+  --directories /srv/files \
+  --host 0.0.0.0 \
+  --http-port 3001 \
+  --auth-token "$MCP_AUTH_TOKEN" \
+  --access-mode readonly \
+  --enable-read
 ```
 
-### HTTP bind examples
+Use HTTPS directly or terminate TLS at a trusted reverse proxy before
+exposing the server remotely.
 
-Bind to IPv4 loopback on the default HTTP port:
+## Tool categories
 
-```sh
-mcp-filesystem --directories /srv/data --host 127.0.0.1 --http-port 3001 --enable-read
+No tools are advertised unless at least one category is enabled.
+
+| Flag | Category |
+|---|---|
+| `--enable-read` | read, list, search, stat and hash |
+| `--enable-write` | create, write, edit, copy and move |
+| `--enable-delete` | file and directory deletion |
+| `--enable-compress` | gzip, zstd and tar |
+| `--enable-crypto` | encryption, decryption and key generation |
+| `--enable-csv` | CSV read and mutation tools |
+| `--enable-all` | every category |
+
+The complete tool schemas are defined in [`tools.json`](tools.json).
+
+`--access-mode readonly` remains an additional runtime restriction. OAuth
+scopes planned for MVP-2 will only reduce access further; they will never
+activate a disabled category.
+
+## MCP Streamable HTTP
+
+The canonical remote MCP endpoint is:
+
+```text
+https://your-domain.example/mcp
 ```
 
-Bind to IPv6 loopback:
+### Initialize
 
-```sh
-mcp-filesystem --directories /srv/data --host ::1 --http-port 3001 --enable-read
+```bash
+curl -i http://127.0.0.1:3001/mcp \
+  -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -d '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"initialize",
+    "params":{
+      "protocolVersion":"2025-11-25",
+      "capabilities":{},
+      "clientInfo":{"name":"example","version":"1.0"}
+    }
+  }'
 ```
 
-When calling the HTTP endpoint over IPv6, wrap the literal address in brackets:
+The response contains `MCP-Session-Id`. Include it on all subsequent `/mcp`
+requests:
 
-```sh
-curl -X POST http://[::1]:3001/rpc -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```bash
+curl http://127.0.0.1:3001/mcp \
+  -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -H 'mcp-session-id: <session-id>' \
+  -H 'mcp-protocol-version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 ```
 
-Bind to all IPv4 and IPv6 interfaces when the host OS supports dual-stack sockets:
+Open the server SSE stream with `GET /mcp` and
+`Accept: text/event-stream`. A session can be terminated with `DELETE /mcp`.
 
-```sh
-mcp-filesystem --directories /srv/data --host :: --http-port 3001 --auth-token "$MCP_AUTH_TOKEN" --enable-all
+### Legacy endpoint
+
+Existing clients may continue to use:
+
+```text
+POST /rpc
+Content-Type: application/json
 ```
 
-Bind to all IPv4 interfaces explicitly:
+The legacy endpoint is intentionally stateless and does not require
+`MCP-Session-Id`.
 
-```sh
-mcp-filesystem --directories /srv/data --host 0.0.0.0 --http-port 3001 --auth-token "$MCP_AUTH_TOKEN" --enable-all
-```
+## Filesystem Resources
 
-### Alwaysdata / IPv6-only hosting
-
-On IPv6-only hosts such as Alwaysdata, bind the HTTP transport to the IPv6 address provided by the platform, or to the IPv6 unspecified address if the platform expects the process to listen on all IPv6 interfaces. Use the platform-provided port when one is assigned through an environment variable:
-
-```sh
-mcp-filesystem --directories "$HOME/files" --host :: --http-port "$PORT" --auth-token "$MCP_AUTH_TOKEN" --enable-all
-```
-
-If Alwaysdata provides a concrete IPv6 address, pass it directly without URL brackets to `--host`; brackets are only for client URLs:
-
-```sh
-mcp-filesystem --directories "$HOME/files" --host 2001:db8::10 --http-port 3001 --auth-token "$MCP_AUTH_TOKEN" --enable-all
-```
-
-### Example MCP client configuration
+The server advertises the MCP `resources` capability.
 
 ```json
 {
-  "mcpServers": {
-    "filesystem": {
-      "command": "mcp-filesystem",
-      "args": ["--stdio", "--directories", "/path/to/allowed/dir", "--enable-all"]
-    }
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "resources/list"
+}
+```
+
+Regular files under every allowed directory are exposed as `file://` URIs.
+`resources/read` returns text for textual formats and base64 `blob` for binary
+formats. URI decoding is followed by the same capability sandbox validation
+used by tools.
+
+The resource list is paginated, excludes hidden path components and is
+bounded to prevent unbounded scans.
+
+## ChatGPT / MCP Apps UI
+
+Browser-oriented tools reference:
+
+```text
+ui://filesystem/browser-v1.html
+```
+
+The resource MIME type is:
+
+```text
+text/html;profile=mcp-app
+```
+
+The component provides:
+
+- allowed directory selection;
+- directory and file lists;
+- glob search;
+- text, Markdown and JSON preview;
+- CSV table preview;
+- image preview;
+- responsive light/dark layout.
+
+The UI uses the open MCP Apps `postMessage` bridge first and treats
+`window.openai` as an optional compatibility enhancement.
+
+Tool descriptors use current metadata:
+
+```json
+{
+  "_meta": {
+    "ui": {
+      "resourceUri": "ui://filesystem/browser-v1.html",
+      "visibility": ["model", "app"]
+    },
+    "openai/outputTemplate": "ui://filesystem/browser-v1.html"
   }
 }
 ```
 
-### CLI options
+See [`docs/chatgpt-apps.md`](docs/chatgpt-apps.md) for setup and protocol
+examples.
 
-| Flag | Default | Description |
-|---|---|---|
-| `-d, --directories <DIR>` | — | Directories to allow access to (repeatable) |
-| `-H, --host <HOST>` | `127.0.0.1` | Server host (HTTP transport) |
-| `--http-port <PORT>` / `--port <PORT>` | `3001` | HTTP server port |
-| `-l, --log-level <LEVEL>` | `info` | Log level |
-| `--max-file-size <MB>` | `100` | Maximum file size (MB) for reads |
-| `--max-decompressed-size <MB>` | `1024` | Cap on decompression/extraction output (anti-bomb) |
-| `--stdio` | `false` | Run in stdio mode for MCP compatibility |
-| `--health` | `false` | Print local CLI health JSON and exit |
-| `--version` | — | Print the binary version and exit |
-| `--access-mode <MODE>` | `unrestricted` | `unrestricted` or `readonly` |
-| `--follow-symlinks` | `false` | Follow symbolic links |
-| `--request-timeout <SECS>` | `30` | Request timeout in seconds (enforced per request) |
-| `--max-request-bytes <BYTES>` | `16777216` | Max size of a single stdio request line |
-| `--max-http-body-bytes <BYTES>` | `16777216` | Max size of a single HTTP JSON-RPC request body |
-| `--auth-token <TOKEN>` | — | Bearer token required on HTTP (`Authorization` header) |
-| `--tls-cert <PATH>` | — | PEM certificate chain to serve the HTTP transport over TLS (HTTPS). Requires `--tls-key` |
-| `--tls-key <PATH>` | — | PEM private key matching `--tls-cert` |
-| **Tool exposure** | | *(none enabled by default)* |
-| `--enable-all` | `false` | Expose every category (overrides the flags below) |
-| `--enable-read` | `false` | **Read**: read files, list/search/stat, hashes, disk usage |
-| `--enable-write` | `false` | **Write**: write/edit, create dir, move/copy, perms, symlink |
-| `--enable-delete` | `false` | **Delete**: delete file/directory |
-| `--enable-compress` | `false` | **Compress**: gzip, zstd, tar (de)compression |
-| `--enable-crypto` | `false` | **Crypto**: encrypt/decrypt files, key generation |
-| `--enable-csv` | `false` | **CSV**: CSV read/write helpers |
+## Security model
 
-### TLS (HTTPS)
+Every filesystem path must resolve below an explicitly allowed root.
 
-The HTTP transport can be served over TLS (rustls, `ring` provider). Provide a
-PEM certificate chain and private key — via `--tls-cert`/`--tls-key` or the
-`MCP_TLS_CERT`/`MCP_TLS_KEY` environment variables — and the HTTP server speaks
-HTTPS instead of plaintext. The two must be supplied together; otherwise the
-server refuses to start. When neither is set, the HTTP transport stays plaintext
-(the default).
+Protection layers include:
 
-### Tool Exposure (opt-in by category)
+- canonical path containment;
+- capability-relative filesystem handles;
+- symlink components denied by default;
+- opt-in write/delete/crypto/compression categories;
+- read-only mode;
+- file, request and decompression limits;
+- constant-time static token comparison;
+- same-origin or `MCP_ALLOWED_ORIGINS` validation;
+- session and MCP protocol-version validation;
+- hidden files omitted from advertised resources.
 
-Every tool belongs to one of **6 categories**. **Nothing is exposed until you
-enable its category** — disabled tools are hidden from `tools/list` and rejected
-from `tools/call` as if they did not exist. This lets you grant an agent exactly
-the surface area it needs (e.g. read-only `--enable-read`).
+Never mount `/`, a home directory containing secrets, Docker socket paths or
+system configuration directories into a remote deployment.
 
-| Flag | Category | Tools |
-|------|----------|-------|
-| `--enable-read` | **Read** | `read_text_file`, `read_media_file`, `read_file_range`, `list_directory`, `list_directory_with_sizes`, `directory_tree`, `get_file_info`, `search_files`, `grep_files`, `hash_file`, `get_disk_usage`, `list_allowed_directories` |
-| `--enable-write` | **Write** | `write_file`, `edit_file`, `create_directory`, `move_file`, `copy_file`, `set_permissions`, `create_symlink` |
-| `--enable-delete` | **Delete** | `delete_file`, `delete_directory` |
-| `--enable-compress` | **Compress** | `compress_gzip`/`decompress_gzip`, `compress_zstd`/`decompress_zstd`, `compress_tar`/`decompress_tar` |
-| `--enable-crypto` | **Crypto** | `encrypt_file`, `decrypt_file`, `generate_key` |
-| `--enable-csv` | **CSV** | `csv_create`, `csv_read`, `csv_add_row`, `csv_update_cell`, `csv_remove_row`, `csv_add_column`, `csv_remove_column`, `csv_rename_column`, `csv_read_column_values_range`, `csv_read_row_range`, `csv_select_column_range` |
-| `--enable-all` | *(all)* | Every category. Overrides the individual flags. |
+### Authentication status
 
-Category gating composes with `--access-mode readonly` (which additionally
-blocks all write tools).
+MVP-1 supports an optional static bearer token for private deployments. A
+public multi-user ChatGPT app requires OAuth authorization code + PKCE,
+protected-resource metadata, audience validation, scopes, refresh token
+rotation and per-user storage roots. The required design is documented in
+[`docs/oauth.md`](docs/oauth.md).
 
-```bash
-mcp-filesystem --directories /srv/data --host ::1 --http-port 3001 --tls-cert ./cert.pem --tls-key ./key.pem --enable-read
-```
-
-## MCP Compliance
-
-Implements the [Model Context Protocol](https://modelcontextprotocol.io) revision **`2025-11-25`** over JSON-RPC 2.0, via stdio or HTTP.
-
-| Area | Support |
-|---|---|
-| Transports | stdio, HTTP (`POST /rpc`) |
-| Protocol version | `2025-11-25`, negotiates down to `2025-06-18` / `2025-03-26` / `2024-11-05` |
-| `initialize` | ✅ version negotiation + `instructions` |
-| `tools/list`, `tools/call` | ✅ (41 tools) |
-| `CallToolResult` | ✅ `content[]` + `structuredContent` + `isError`; `read_media_file` returns typed `image`/`audio` content |
-| Capabilities advertised | `tools` only — nothing is advertised that isn't implemented |
-| `resources` · `prompts` · `logging` · Streamable HTTP | ❌ roadmap — see [MIGRATION.md](./MIGRATION.md) |
-
-Every `tools/call` returns a spec-compliant `CallToolResult`. The payload is
-available as a machine-readable `structuredContent` object and as serialized
-`text`; tool failures come back with `isError: true` (not as JSON-RPC protocol
-errors) so the model can self-correct.
-
-```json
-{
-  "content": [{ "type": "text", "text": "{\"content\":\"Hello, World!\",\"totalLines\":1}" }],
-  "structuredContent": { "content": "Hello, World!", "totalLines": 1 },
-  "isError": false
-}
-```
-
-Upgrading from 1.x? The result shape changed — see **[MIGRATION.md](./MIGRATION.md)**.
-
-## Security
-
-- **Path sandboxing**: every path is canonicalized and checked against the allow-list. Symlink components are rejected unless `--follow-symlinks` is set; write destinations whose final component is a symlink are also rejected.
-- **Network exposure**: the default bind is loopback (`127.0.0.1`). Binding to a non-loopback host without `--auth-token` logs a prominent warning — the allow-listed directories would otherwise be reachable, unauthenticated, over the network.
-- **Resource limits**: stdio request lines are size-capped (`--max-request-bytes`), requests are time-bounded (`--request-timeout`), and decompression output is capped (`--max-decompressed-size`).
-- **Cryptography posture (June 2026)**: the supported algorithms are deliberately limited to AES-256-GCM, ChaCha20-Poly1305, and post-quantum ML-KEM-768/1024 (FIPS 203). RSA-OAEP was removed — it is being deprecated by [CNSA 2.0](https://www.nsa.gov/Cybersecurity/Post-Quantum-Cryptography/) and [NIST IR 8547](https://csrc.nist.gov/pubs/ir/8547/ipd) and was the project's only source of an unfixable advisory (the `rsa` Marvin timing side-channel, [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)). `cargo audit` is clean with no acknowledged advisories. A hybrid `X25519 + ML-KEM-768` (X-Wing) mode is planned once a stable, audited Rust implementation is available — the current `x-wing` crate is still a pre-release.
-
-## GitHub Actions release binaries
-
-The repository includes a GitHub Actions workflow at `.github/workflows/release-binaries.yml`. It runs on `v*` tags and manual `workflow_dispatch` runs, builds release binaries with `cargo build --release`, and uploads the binaries as workflow artifacts.
-
-Current artifacts:
-
-| Artifact | Target | Output file |
-|---|---|---|
-| `mcp-filesystem-linux-x86_64` | `x86_64-unknown-linux-gnu` | Linux x86_64 executable |
-| `mcp-filesystem-windows-x86_64.exe` | `x86_64-pc-windows-msvc` | Windows x86_64 executable |
-
-The workflow uses a matrix so additional targets, such as Linux ARM64, can be added by appending another matrix entry.
-
-## Development
-
-```sh
-cargo build      # Build all targets
-cargo test       # Run the full test suite (unit + integration)
-cargo clippy     # Zero-warnings lint check
-```
-
-## Versioning & Compatibility
-
-Follows [Semantic Versioning](https://semver.org). The current line is **2.x**,
-targeting MCP revision `2025-11-25`. The `2.0.0` release changed the `tools/call`
-result shape to be spec-compliant — see **[MIGRATION.md](./MIGRATION.md)**.
-
-| mcp-filesystem | MCP revision (default) | Negotiates |
-|---|---|---|
-| 2.x | `2025-11-25` | `2025-06-18`, `2025-03-26`, `2024-11-05` |
-| ≤ 1.x | `2024-11-05` | — |
-
-## License
-
-Licensed under the [Apache-2.0](LICENSE) license.
-
-## OpenAI Apps SDK / ChatGPT compatibility
-
-This server is compatible with ChatGPT's MCP HTTP transport when exposed over HTTPS. It intentionally does **not** ship ChatGPT UI resources, Apps SDK HTML resources, authentication flows, or MCP Inspector integration yet.
-
-### MCP and JSON-RPC behavior
-
-- `initialize` negotiates supported protocol revisions and returns honest server capabilities.
-- `notifications/initialized` and other `notifications/*` messages are accepted as JSON-RPC notifications.
-- `ping`, `tools/list`, `tools/call`, `prompts/list`, and `resources/list` are implemented.
-- `prompts/list` and `resources/list` return empty lists because this server currently exposes filesystem operations as tools only.
-- Unknown methods return standard JSON-RPC `-32601` errors.
-- Malformed JSON returns `-32700`; structurally invalid JSON-RPC requests return `-32600`; invalid parameters return `-32602`.
-- Tool execution failures are returned as MCP `CallToolResult` values with `isError: true` so clients and models can inspect the failure without treating it as a protocol failure.
-
-### HTTP endpoints
+## HTTP endpoints
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/rpc` | MCP JSON-RPC endpoint. Requires `Content-Type: application/json`. |
-| `GET` | `/health` | Health check: `{"status":"UP","version":"...","transport":"http"}`. |
-| `GET` | `/version` | Returns the server version. |
-| `GET` | `/info` | Returns version, protocol version, enabled tool categories, enabled tool count, access mode, and allowed directories. |
-| `GET` | `/tools` | Diagnostic view of the same filtered tool descriptors returned by `tools/list`. |
+| `POST` | `/mcp` | Streamable HTTP JSON-RPC |
+| `GET` | `/mcp` | session SSE stream |
+| `DELETE` | `/mcp` | close session |
+| `POST` | `/rpc` | legacy JSON-RPC |
+| `GET` | `/health` | health check |
+| `GET` | `/version` | version |
+| `GET` | `/info` | runtime configuration summary |
+| `GET` | `/tools` | filtered tool descriptors |
 
-HTTP requests are bounded by `--max-http-body-bytes`, timed out by `--request-timeout`, and malformed requests return JSON-RPC error bodies where possible.
+## Important options
 
-### Example initialize request
+| Option | Default | Description |
+|---|---:|---|
+| `--directories <PATH>` | current directory | allowed root; repeatable |
+| `--host <HOST>` | `127.0.0.1` | HTTP bind host |
+| `--http-port <PORT>` | `3001` | HTTP port |
+| `--stdio` | false | use stdio instead of HTTP |
+| `--access-mode <MODE>` | unrestricted | `unrestricted` or `readonly` |
+| `--follow-symlinks` | false | allow symlink traversal |
+| `--auth-token <TOKEN>` | none | static HTTP bearer token |
+| `--tls-cert <PATH>` | none | PEM certificate chain |
+| `--tls-key <PATH>` | none | PEM private key |
+| `--max-file-size <MB>` | 100 | maximum read size |
+| `--max-decompressed-size <MB>` | 1024 | extraction output limit |
+| `--max-request-bytes <BYTES>` | 16777216 | stdio request limit |
+| `--max-http-body-bytes <BYTES>` | 16777216 | HTTP request limit |
+| `--request-timeout <SECONDS>` | 30 | per-request timeout |
 
-```sh
-curl -s http://127.0.0.1:3001/rpc \
-  -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"example","version":"1.0.0"}}}'
+`MCP_ALLOWED_ORIGINS` is a comma-separated environment variable used for
+non-same-origin browser requests.
+
+## Docker
+
+```bash
+cp .env.example .env
+docker compose up -d --build
 ```
 
-### Example tools/list request
+The default Compose profile:
 
-```sh
-curl -s http://127.0.0.1:3001/rpc \
-  -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+- runs as an unprivileged user;
+- drops Linux capabilities;
+- uses a read-only root filesystem;
+- mounts `/data` read-only;
+- enables only read tools;
+- requires a static bearer token;
+- checks `/health`.
+
+See [`docs/deployment.md`](docs/deployment.md) for reverse proxy and scaling
+requirements.
+
+## Development
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features
+cargo test --all-features
+cargo build --release
 ```
 
-### Example tools/call request
+CI runs the same checks on Rust stable.
 
-```sh
-curl -s http://127.0.0.1:3001/rpc \
-  -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_allowed_directories","arguments":{}}}'
-```
+## Documentation
 
-### Tool descriptors and responses
+- [Current-code audit](docs/chatgpt-apps-audit.md)
+- [ChatGPT Apps setup](docs/chatgpt-apps.md)
+- [OAuth and multi-user design](docs/oauth.md)
+- [Deployment](docs/deployment.md)
+- [Migration notes](MIGRATION.md)
+- [Changelog](CHANGELOG.md)
 
-Tool descriptors include `title`, `description`, `inputSchema`, `outputSchema`, and Apps SDK-compatible annotations. Read-only tools set `readOnlyHint: true`; writes set `readOnlyHint: false`; overwrite/delete-style tools set `destructiveHint: true`; bounded filesystem operations set `openWorldHint: false`.
+## MVP roadmap
 
-Tool responses follow MCP `CallToolResult` shape and include `content` plus `structuredContent` whenever the underlying action returns a JSON object. `_meta` is supported by the response shape, but no ChatGPT UI-specific `_meta.ui.resourceUri` values are emitted until UI resources are implemented.
+### MVP-1 — implemented in this branch
 
-### Compatibility limitations
+- Streamable HTTP;
+- Resources API;
+- Apps UI resource;
+- File Browser;
+- deployment foundation.
 
-- ChatGPT UI resources / Apps SDK HTML resources are not implemented yet.
-- Authentication flows are not implemented; the existing optional bearer token remains available for HTTP deployments.
-- MCP Inspector integration is not included.
-- No prompts or resources are currently exposed; their list methods return empty arrays.
+### MVP-2
+
+- OAuth and discovery metadata;
+- scope enforcement;
+- request-scoped user sandbox;
+- rotating refresh tokens;
+- audit sink and JSONL output;
+- shared session store.
+
+### MVP-3
+
+- enterprise policy engine;
+- quotas and rate limits;
+- distributed SSE notifications;
+- admin console;
+- advanced previews and upload workflows.
+
+## License
+
+Apache-2.0.
