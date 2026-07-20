@@ -19,7 +19,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Extract and execute source patch
+      - name: Extract source patch
         shell: bash
         run: |
           python3 - <<'PY'
@@ -35,10 +35,35 @@ jobs:
               encoding='utf-8',
           )
           PY
-          python3 /tmp/direct_patch.py
+      - name: Execute source patch
+        id: patch
+        shell: bash
+        run: |
+          set +e
+          python3 /tmp/direct_patch.py > /tmp/direct-patch.log 2>&1
+          status=$?
+          cat /tmp/direct-patch.log
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Upload patch diagnostics
+        if: steps.patch.outputs.exit_code != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: direct-patch-log
+          path: |
+            /tmp/direct-patch.log
+            /tmp/direct_patch.py
+      - name: Fail on patch error
+        if: steps.patch.outputs.exit_code != '0'
+        run: exit 1
+      - name: Format direct patch
+        if: steps.patch.outputs.exit_code == '0'
+        shell: bash
+        run: |
           rm -f .github/workflows/apply-direct.yml
           cargo fmt --all
       - name: Commit direct source patch
+        if: steps.patch.outputs.exit_code == '0'
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
