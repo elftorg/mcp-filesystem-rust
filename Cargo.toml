@@ -2,7 +2,6 @@
 name = "mcp-filesystem"
 version = "2.3.0"
 edition = "2024"
-build = "build.rs"
 authors = ["Piyush"]
 description = "High-performance MCP server for filesystem access with parallel async I/O, glob search, media detection, and secure path sandboxing"
 repository = "https://github.com/elftorg/mcp-filesystem-rust"
@@ -11,7 +10,7 @@ license = "Apache-2.0"
 readme = "README.md"
 keywords = ["mcp", "filesystem", "server", "json-rpc", "file-io"]
 categories = ["filesystem", "web-programming::http-server"]
-include = ["src/", "app/", "docs/", "build.rs", "tools.json", "Cargo.toml", "README.md", "LICENSE"]
+include = ["src/", "app/", "docs/", "tools.json", "Cargo.toml", "README.md", "LICENSE"]
 
 [dependencies]
 # Async runtime

@@ -287,17 +287,16 @@ impl Sandbox {
             .await
             .map_err(|e| MCSError::FilesystemError(format!("Symlink task failed: {e}")))?
             .map_err(|e| MCSError::FilesystemError(format!("Cannot create symlink: {e}")))?;
+            Ok(())
         }
 
-        #[cfg(windows)]
+        #[cfg(not(unix))]
         {
             let _ = (src_abs, link_abs);
-            return Err(MCSError::FilesystemError(
-                "Symlinks not supported through sandbox on Windows yet".into(),
-            ));
+            Err(MCSError::FilesystemError(
+                "Symlinks are not supported through the sandbox on this platform".into(),
+            ))
         }
-
-        Ok(())
     }
 }
 
@@ -491,16 +490,15 @@ impl Resolved {
 
 /// Check that no component of the path is a symlink.
 fn check_symlinks_in_path(path: &Path) -> std::result::Result<(), ()> {
-    let mut current = if path.is_absolute() {
-        PathBuf::from("/")
-    } else {
+    if !path.is_absolute() {
         return Err(());
-    };
+    }
 
+    let mut current = PathBuf::new();
     for component in path.components() {
         match component {
-            Component::RootDir => continue,
-            Component::Prefix(_) => continue,
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
             Component::CurDir | Component::ParentDir => return Err(()),
             Component::Normal(name) => {
                 current.push(name);
@@ -599,7 +597,10 @@ mod tests {
     #[test]
     fn test_check_symlinks_clean_path() {
         // Use a non-existent path under root to avoid macOS /tmp → /private/tmp symlink.
-        let p = Path::new("/nonexistent_dir_xyzabc/nonexistent_file");
-        assert!(check_symlinks_in_path(p).is_ok());
+        let path = std::env::current_dir()
+            .unwrap()
+            .join("nonexistent_dir_xyzabc")
+            .join("nonexistent_file");
+        assert!(check_symlinks_in_path(&path).is_ok());
     }
 }

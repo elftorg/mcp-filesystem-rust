@@ -415,7 +415,21 @@ fn create_tar_archive(
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
             );
-            header.set_mode(metadata.permissions().mode());
+            let archive_mode = {
+                #[cfg(unix)]
+                {
+                    metadata.permissions().mode()
+                }
+                #[cfg(not(unix))]
+                {
+                    if metadata.permissions().readonly() {
+                        0o444
+                    } else {
+                        0o644
+                    }
+                }
+            };
+            header.set_mode(archive_mode);
             header.set_cksum();
             archive
                 .append(&header, &mut file)
