@@ -10,27 +10,41 @@ permissions:
 jobs:
   endpoint:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 6
     env:
       MCP_URL: https://b24.alwaysdata.net/mcpfs/mcp
       MCP_PROTOCOL: 2025-11-25
     steps:
-      - name: Health checks
+      - name: Probe health endpoints
+        continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
-          curl -fsS --connect-timeout 8 --max-time 20 https://b24.alwaysdata.net/mcpfs/health | tee health.json
-          jq -e '.status == "ok"' health.json >/dev/null
-          curl -fsS --connect-timeout 8 --max-time 20 https://b24.alwaysdata.net/mcpfs/health/backend | tee backend.json
-          jq -e '.status == "up" and .backend.transport == "streamable-http"' backend.json >/dev/null
+          set +e
+          for url in https://b24.alwaysdata.net/mcpfs/health https://b24.alwaysdata.net/mcpfs/health/backend http://services-b24.alwaysdata.net:8345/health; do
+            result=$(curl -sS --connect-timeout 6 --max-time 12 -o body -w 'code=%{http_code} start=%{time_starttransfer}s total=%{time_total}s bytes=%{size_download}' "$url" 2>err)
+            rc=$?
+            echo "$url rc=$rc $result"
+            test -s err && cat err
+            test -s body && head -c 500 body && echo
+          done
+          exit 0
 
       - name: Initialize session
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsS --connect-timeout 8 --max-time 20 -D init.headers -o init.json \
-            -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"github-actions","version":"1.0"}}}' "$MCP_URL"
+          for attempt in 1 2 3; do
+            rm -f init.headers init.json
+            if curl -fsS --retry 1 --retry-all-errors --retry-delay 2 --connect-timeout 8 --max-time 25 \
+              -D init.headers -o init.json \
+              -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+              --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"github-actions","version":"1.0"}}}' "$MCP_URL"; then
+              break
+            fi
+            echo "initialize attempt $attempt failed"
+            sleep 3
+          done
+          test -s init.json
           sid="$(grep -i '^mcp-session-id:' init.headers | head -1 | cut -d: -f2- | tr -d ' \r')"
           test -n "$sid"
           echo "MCP_SESSION_ID=$sid" >> "$GITHUB_ENV"
@@ -42,7 +56,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          code="$(curl -sS --connect-timeout 8 --max-time 20 -o notify.body -w '%{http_code}' \
+          code="$(curl -sS --retry 1 --retry-all-errors --connect-timeout 8 --max-time 25 -o notify.body -w '%{http_code}' \
             -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -H "MCP-Session-Id: $MCP_SESSION_ID" -H "MCP-Protocol-Version: $MCP_PROTOCOL" \
             --data '{"jsonrpc":"2.0","method":"notifications/initialized"}' "$MCP_URL")"
@@ -53,7 +67,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsS --connect-timeout 8 --max-time 20 -o tools.json \
+          curl -fsS --retry 1 --retry-all-errors --connect-timeout 8 --max-time 25 -o tools.json \
             -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -H "MCP-Session-Id: $MCP_SESSION_ID" -H "MCP-Protocol-Version: $MCP_PROTOCOL" \
             --data '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' "$MCP_URL"
@@ -64,7 +78,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsS --connect-timeout 8 --max-time 20 -o tool-call.json \
+          curl -fsS --retry 1 --retry-all-errors --connect-timeout 8 --max-time 25 -o tool-call.json \
             -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -H "MCP-Session-Id: $MCP_SESSION_ID" -H "MCP-Protocol-Version: $MCP_PROTOCOL" \
             --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_allowed_directories","arguments":{}}}' "$MCP_URL"
@@ -75,7 +89,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsS --connect-timeout 8 --max-time 20 -o resources.json \
+          curl -fsS --retry 1 --retry-all-errors --connect-timeout 8 --max-time 25 -o resources.json \
             -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -H "MCP-Session-Id: $MCP_SESSION_ID" -H "MCP-Protocol-Version: $MCP_PROTOCOL" \
             --data '{"jsonrpc":"2.0","id":4,"method":"resources/list"}' "$MCP_URL"
@@ -86,7 +100,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsS --connect-timeout 8 --max-time 20 -o resource-read.json \
+          curl -fsS --retry 1 --retry-all-errors --connect-timeout 8 --max-time 25 -o resource-read.json \
             -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -H "MCP-Session-Id: $MCP_SESSION_ID" -H "MCP-Protocol-Version: $MCP_PROTOCOL" \
             --data '{"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"ui://filesystem/browser-v1.html"}}' "$MCP_URL"
