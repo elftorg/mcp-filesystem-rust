@@ -8,7 +8,6 @@ pub mod server;
 pub mod structures;
 pub mod tls;
 pub mod tools;
-
 pub mod validation;
 
 use clap::Parser;
