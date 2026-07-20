@@ -26,7 +26,9 @@ fn main() {
 }
 
 fn read_source(path: &str) -> String {
-    fs::read_to_string(path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"))
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("cannot read {path}: {error}"))
+        .replace("\r\n", "\n")
 }
 
 fn write_generated(out_dir: &Path, name: &str, source: &str) {
