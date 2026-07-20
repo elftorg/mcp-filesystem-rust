@@ -421,7 +421,10 @@ pub async fn get_file_info(args: Option<&Value>, config: &Config) -> Result<Valu
             .map(|d| d.as_secs_f64())
     });
 
-    let permissions = format!("{:o}", cap_meta.permissions().mode() & 0o777);
+    #[cfg(unix)]
+    let permissions = Some(format!("{:o}", cap_meta.permissions().mode() & 0o777));
+    #[cfg(not(unix))]
+    let permissions: Option<String> = None;
 
     Ok(json!({
         "path": valid_path.to_string_lossy(),
@@ -495,32 +498,35 @@ pub async fn hash_file(args: Option<&Value>, config: &Config) -> Result<Value> {
 }
 
 pub async fn set_permissions(args: Option<&Value>, config: &Config) -> Result<Value> {
-    let path = get_str_arg(args, "path")?;
-    let mode_str = get_str_arg(args, "mode")?;
-    let resolved = config.sandbox().resolve(&path)?;
-
-    let mode = u32::from_str_radix(&mode_str, 8).map_err(|_| {
-        MCSError::InvalidParams(format!(
-            "Invalid mode: {mode_str}. Use octal format (e.g. 644, 755)"
-        ))
-    })?;
-
     #[cfg(unix)]
     {
+        let path = get_str_arg(args, "path")?;
+        let mode_str = get_str_arg(args, "mode")?;
+        let resolved = config.sandbox().resolve(&path)?;
+        let mode = u32::from_str_radix(&mode_str, 8).map_err(|_| {
+            MCSError::InvalidParams(format!(
+                "Invalid mode: {mode_str}. Use octal format (e.g. 644, 755)"
+            ))
+        })?;
+
         use cap_std::fs::PermissionsExt;
-        let perm = cap_std::fs::Permissions::from_mode(mode);
-        resolved.set_permissions(perm).await?;
+        let permissions = cap_std::fs::Permissions::from_mode(mode);
+        resolved.set_permissions(permissions).await?;
+
+        Ok(json!({
+            "success": true,
+            "path": resolved.canonical.to_string_lossy(),
+            "mode": mode_str,
+        }))
     }
 
     #[cfg(not(unix))]
     {
-        let _ = (mode, &resolved);
-        return Err(MCSError::FilesystemError(
+        let _ = (args, config);
+        Err(MCSError::FilesystemError(
             "Permission changes are not supported on this platform".into(),
-        ));
+        ))
     }
-
-    Ok(json!({ "success": true, "path": resolved.canonical.to_string_lossy(), "mode": mode_str }))
 }
 
 pub async fn create_symlink(args: Option<&Value>, config: &Config) -> Result<Value> {
