@@ -30,15 +30,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features
       - name: Test
-        shell: pwsh
-        run: |
-          cargo test --all-features *>&1 | Tee-Object -FilePath test.log
-          exit $LASTEXITCODE
-      - name: Upload Windows test diagnostics
-        if: failure() && matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-test-log
-          path: test.log
+        run: cargo test --all-features
       - name: Release build
         run: cargo build --release
