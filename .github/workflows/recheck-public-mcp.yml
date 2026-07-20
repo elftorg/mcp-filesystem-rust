@@ -1,0 +1,106 @@
+name: Recheck published MCP endpoint
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  endpoint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    env:
+      MCP_URL: https://b24.alwaysdata.net/mcpfs/mcp
+      HEALTH_URL: https://b24.alwaysdata.net/mcpfs/health
+      BACKEND_HEALTH_URL: https://b24.alwaysdata.net/mcpfs/health/backend
+      MCP_PROTOCOL: 2025-11-25
+    steps:
+      - name: Health
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS --connect-timeout 8 --max-time 20 "$HEALTH_URL" | tee health.json
+          jq -e '.status == "ok" and .version == "1.1.0"' health.json >/dev/null
+          curl -fsS --connect-timeout 8 --max-time 20 "$BACKEND_HEALTH_URL" | tee backend.json
+          jq -e '.status == "up" and .backend.status == "UP" and .backend.transport == "streamable-http"' backend.json >/dev/null
+
+      - name: GET MCP is rejected immediately
+        shell: bash
+        run: |
+          set -euo pipefail
+          metrics=$(curl -sS --connect-timeout 8 --max-time 10 -D get.headers -o get.body \
+            -w 'code=%{http_code} start=%{time_starttransfer}s total=%{time_total}s bytes=%{size_download}' \
+            -H 'Accept: text/event-stream' "$MCP_URL")
+          echo "$metrics"
+          cat get.headers
+          cat get.body
+          grep -qi '^HTTP/.* 405' get.headers
+          grep -qi '^allow: POST, DELETE' get.headers
+          jq -e '.jsonrpc == "2.0" and .error.code == -32000' get.body >/dev/null
+
+      - name: Initialize
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS --connect-timeout 8 --max-time 20 -D init.headers -o init.json \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"github-actions-recheck","version":"1.0"}}}' \
+            "$MCP_URL"
+          sid="$(grep -i '^mcp-session-id:' init.headers | head -1 | cut -d: -f2- | tr -d ' \r')"
+          test -n "$sid"
+          echo "MCP_SESSION_ID=$sid" >> "$GITHUB_ENV"
+          jq -e '.result.protocolVersion == "2025-11-25" and .result.serverInfo.name == "mcp-filesystem" and (.result.capabilities.tools != null) and (.result.capabilities.resources != null)' init.json >/dev/null
+          jq '{protocolVersion:.result.protocolVersion,server:.result.serverInfo,capabilities:.result.capabilities}' init.json
+          echo "session=${sid:0:8}..."
+
+      - name: Initialize notification
+        shell: bash
+        run: |
+          set -euo pipefail
+          code=$(curl -sS --connect-timeout 8 --max-time 20 -o notify.body -w '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -H "MCP-Session-Id: $MCP_SESSION_ID" \
+            -H "MCP-Protocol-Version: $MCP_PROTOCOL" \
+            --data '{"jsonrpc":"2.0","method":"notifications/initialized"}' "$MCP_URL")
+          echo "http=$code body=$(cat notify.body)"
+          case "$code" in 200|202|204) ;; *) exit 1;; esac
+
+      - name: Tools and resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          common=(-H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H "MCP-Session-Id: $MCP_SESSION_ID" -H "MCP-Protocol-Version: $MCP_PROTOCOL")
+          curl -fsS --connect-timeout 8 --max-time 20 -o tools.json "${common[@]}" \
+            --data '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' "$MCP_URL"
+          jq -e '.result.tools | type == "array" and length > 0' tools.json >/dev/null
+          jq '{toolCount:(.result.tools|length),toolNames:(.result.tools|map(.name))}' tools.json
+
+          curl -fsS --connect-timeout 8 --max-time 20 -o call.json "${common[@]}" \
+            --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_allowed_directories","arguments":{}}}' "$MCP_URL"
+          jq -e '.result.isError != true' call.json >/dev/null
+          jq '{isError:.result.isError,structuredContent:.result.structuredContent}' call.json
+
+          curl -fsS --connect-timeout 8 --max-time 20 -o resources.json "${common[@]}" \
+            --data '{"jsonrpc":"2.0","id":4,"method":"resources/list"}' "$MCP_URL"
+          jq -e '.result.resources | type == "array" and any(.uri == "ui://filesystem/browser-v1.html")' resources.json >/dev/null
+          jq '{resourceCount:(.result.resources|length),resourceUris:(.result.resources|map(.uri)|.[0:10])}' resources.json
+
+          curl -fsS --connect-timeout 8 --max-time 20 -o read.json "${common[@]}" \
+            --data '{"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"ui://filesystem/browser-v1.html"}}' "$MCP_URL"
+          jq -e '.result.contents[0].mimeType | startswith("text/html")' read.json >/dev/null
+          jq '{uri:.result.contents[0].uri,mimeType:.result.contents[0].mimeType,textBytes:(.result.contents[0].text|length)}' read.json
+
+      - name: Delete session
+        if: always() && env.MCP_SESSION_ID != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          code=$(curl -sS --connect-timeout 8 --max-time 20 -X DELETE -o delete.body -w '%{http_code}' \
+            -H "MCP-Session-Id: $MCP_SESSION_ID" \
+            -H "MCP-Protocol-Version: $MCP_PROTOCOL" "$MCP_URL")
+          echo "http=$code body=$(cat delete.body)"
+          test "$code" = 204
