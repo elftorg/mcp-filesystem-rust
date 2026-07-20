@@ -4,23 +4,20 @@ version = "2.3.0"
 edition = "2024"
 authors = ["Piyush"]
 description = "High-performance MCP server for filesystem access with parallel async I/O, glob search, media detection, and secure path sandboxing"
-repository = "https://github.com/corporatepiyush/mcp-filesystem-rust"
-homepage = "https://github.com/corporatepiyush/mcp-filesystem-rust"
+repository = "https://github.com/elftorg/mcp-filesystem-rust"
+homepage = "https://github.com/elftorg/mcp-filesystem-rust"
 license = "Apache-2.0"
 readme = "README.md"
 keywords = ["mcp", "filesystem", "server", "json-rpc", "file-io"]
 categories = ["filesystem", "web-programming::http-server"]
-include = ["src/", "tools.json", "Cargo.toml", "README.md", "LICENSE"]
+include = ["src/", "app/", "docs/", "tools.json", "Cargo.toml", "README.md", "LICENSE"]
 
 [dependencies]
 # Async runtime
 tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "io-util", "net", "time", "sync", "io-std", "fs", "process"] }
 
-# HTTP (JSON-RPC over POST /rpc)
+# HTTP transports
 axum = "0.8"
-# Server-side TLS (HTTPS) for the axum HTTP transport. `tls-rustls-no-provider`
-# keeps rustls on the process default `ring` crypto provider (installed in
-# src/tls.rs) — no cmake/aws-lc toolchain required.
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 hyper = { version = "1.0", features = ["full"] }
