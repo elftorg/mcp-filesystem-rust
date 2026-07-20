@@ -1,0 +1,49 @@
+name: PHP proxy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/php-proxy/**'
+      - '.github/workflows/php-proxy.yml'
+  pull_request:
+    paths:
+      - 'deploy/php-proxy/**'
+      - '.github/workflows/php-proxy.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  php-proxy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: php -l deploy/php-proxy/index.php
+      - name: GET MCP returns 405 immediately
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -S 127.0.0.1:8080 deploy/php-proxy/index.php >server.log 2>&1 &
+          server_pid=$!
+          trap 'kill $server_pid || true' EXIT
+          sleep 1
+          curl -sS --max-time 5 -D headers -o body \
+            -H 'Accept: text/event-stream' \
+            http://127.0.0.1:8080/mcpfs/mcp
+          cat headers
+          cat body
+          grep -q '^HTTP/1.1 405' headers
+          grep -qi '^Allow: POST, DELETE' headers
+          jq -e '.jsonrpc == "2.0" and .error.code == -32000' body >/dev/null
+      - name: Proxy health reports version
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -S 127.0.0.1:8081 deploy/php-proxy/index.php >server-health.log 2>&1 &
+          server_pid=$!
+          trap 'kill $server_pid || true' EXIT
+          sleep 1
+          curl -fsS --max-time 5 http://127.0.0.1:8081/mcpfs/health | tee health.json
+          jq -e '.status == "ok" and .version == "1.1.0"' health.json >/dev/null
