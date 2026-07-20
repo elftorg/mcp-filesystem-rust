@@ -30,10 +30,77 @@ jobs:
           marker = "python3 - <<'PY'\n"
           start = workflow.index(marker) + len(marker)
           end = workflow.index("\n          PY", start)
-          Path('/tmp/direct_patch.py').write_text(
-              dedent(workflow[start:end]),
-              encoding='utf-8',
+          script = dedent(workflow[start:end])
+
+          method_start = script.index(
+              'replace_once(\n    "src/validation.rs",\n    \'\'\'    pub async fn create_symlink'
           )
+          method_end = script.index(
+              '\n\nreplace_once(\n    "src/validation.rs",\n    \'\'\'fn check_symlinks_in_path',
+              method_start,
+          )
+          method_patch = """validation_file = Path("src/validation.rs")
+          validation_source = validation_file.read_text(encoding="utf-8")
+          method_start = validation_source.index("    pub async fn create_symlink")
+          method_end = validation_source.index("\\n}\\n\\n/// A path", method_start)
+          validation_method = '''    pub async fn create_symlink(&self, src: &str, link: &str) -> Result<()> {
+                  let src_abs = canonicalize_or_parent(&normalize_path(&to_abs(src)))?;
+                  let link_abs = canonicalize_or_parent(&normalize_path(&to_abs(link)))?;
+
+                  let _src_root = self
+                      .trie
+                      .longest_prefix(&src_abs)
+                      .ok_or_else(|| MCSError::PathNotAllowed(src.to_string()))?;
+                  let _link_root = self
+                      .trie
+                      .longest_prefix(&link_abs)
+                      .ok_or_else(|| MCSError::PathNotAllowed(link.to_string()))?;
+
+                  #[cfg(unix)]
+                  {
+                      tokio::task::spawn_blocking(move || {
+                          std::os::unix::fs::symlink(&src_abs, &link_abs).map_err(|e| {
+                              MCSError::FilesystemError(format!("Cannot create symlink: {e}"))
+                          })
+                      })
+                      .await
+                      .map_err(|e| MCSError::FilesystemError(format!("Symlink task failed: {e}")))?
+                      .map_err(|e| MCSError::FilesystemError(format!("Cannot create symlink: {e}")))?;
+                      Ok(())
+                  }
+
+                  #[cfg(not(unix))]
+                  {
+                      let _ = (src_abs, link_abs);
+                      Err(MCSError::FilesystemError(
+                          "Symlinks are not supported through the sandbox on this platform".into(),
+                      ))
+                  }
+              }
+          '''
+          validation_file.write_text(
+              validation_source[:method_start] + validation_method + validation_source[method_end:],
+              encoding="utf-8",
+          )"""
+          script = script[:method_start] + method_patch + script[method_end:]
+
+          test_start = script.index(
+              'replace_once(\n    "src/validation.rs",\n    \'\'\'        let p = Path::new'
+          )
+          test_end = script.index('\n\nreplace_once("Cargo.toml"', test_start)
+          test_patch = """replace_once(
+              "src/validation.rs",
+              '''        let p = Path::new("/nonexistent_dir_xyzabc/nonexistent_file");
+                  assert!(check_symlinks_in_path(p).is_ok());''',
+              '''        let path = std::env::current_dir()
+                      .unwrap()
+                      .join("nonexistent_dir_xyzabc")
+                      .join("nonexistent_file");
+                  assert!(check_symlinks_in_path(&path).is_ok());''',
+          )"""
+          script = script[:test_start] + test_patch + script[test_end:]
+
+          Path('/tmp/direct_patch.py').write_text(script, encoding='utf-8')
           PY
       - name: Execute source patch
         id: patch
