@@ -38,6 +38,18 @@ async fn inner_main() -> Result<()> {
     // (idempotent) so the HTTPS transport can build its TLS config. See src/tls.rs.
     mcp_filesystem::tls::ensure_crypto_provider();
 
+    if args.health {
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": "UP",
+                "version": env!("CARGO_PKG_VERSION"),
+                "transport": "cli"
+            })
+        );
+        return Ok(());
+    }
+
     init_tracing(&args.log_level)?;
 
     info!("Starting MCP Filesystem Server");

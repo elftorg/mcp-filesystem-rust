@@ -34,6 +34,7 @@ fn config_for(dir: &Path, mode: AccessMode) -> Config {
             access_mode: mode,
             follow_symlinks: false,
             max_request_bytes: 16 * 1024 * 1024,
+            max_http_body_bytes: 16 * 1024 * 1024,
             auth_token: None,
             enabled_categories: mcp_filesystem::tools::ToolCategory::ALL.to_vec(),
             tls_cert: None,

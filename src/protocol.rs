@@ -27,6 +27,43 @@ pub struct JsonRpcError {
     pub data: Option<Value>,
 }
 
+impl JsonRpcRequest {
+    pub fn from_value(value: &Value) -> std::result::Result<Self, crate::errors::MCSError> {
+        let obj = value.as_object().ok_or_else(|| {
+            crate::errors::MCSError::InvalidRequest("request must be a JSON object".into())
+        })?;
+        if obj.get("jsonrpc") != Some(&Value::String("2.0".into())) {
+            return Err(crate::errors::MCSError::InvalidRequest(
+                "jsonrpc must be \"2.0\"".into(),
+            ));
+        }
+        let method = obj
+            .get("method")
+            .and_then(Value::as_str)
+            .filter(|m| !m.is_empty())
+            .ok_or_else(|| {
+                crate::errors::MCSError::InvalidRequest("method must be a non-empty string".into())
+            })?
+            .to_string();
+        let params = obj.get("params").cloned();
+        let id = obj.get("id").cloned();
+        if id
+            .as_ref()
+            .is_some_and(|v| !(v.is_string() || v.is_number() || v.is_null()))
+        {
+            return Err(crate::errors::MCSError::InvalidRequest(
+                "id must be a string, number, or null".into(),
+            ));
+        }
+        Ok(Self {
+            jsonrpc: "2.0".into(),
+            method,
+            params,
+            id,
+        })
+    }
+}
+
 impl JsonRpcResponse {
     pub fn success(id: Option<Value>, result: Value) -> Self {
         Self {
@@ -67,6 +104,15 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let deserialized: JsonRpcRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.method, "read_text_file");
+    }
+
+    #[test]
+    fn validates_jsonrpc_request() {
+        assert!(
+            JsonRpcRequest::from_value(&json!({"jsonrpc":"2.0","method":"ping","id":1})).is_ok()
+        );
+        assert!(JsonRpcRequest::from_value(&json!({"jsonrpc":"1.0","method":"ping"})).is_err());
+        assert!(JsonRpcRequest::from_value(&json!([])).is_err());
     }
 
     #[test]
