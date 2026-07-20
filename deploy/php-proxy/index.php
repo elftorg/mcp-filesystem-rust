@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 const PROXY_NAME = 'mcp-filesystem-php-proxy';
-const PROXY_VERSION = '1.0.0';
+const PROXY_VERSION = '1.1.0';
 
 header_remove('X-Powered-By');
 
@@ -110,12 +110,11 @@ function loadConfig(): array
     return $config;
 }
 
-function prepareStreaming(bool $sse): void
+function prepareResponseStreaming(): void
 {
     @ini_set('output_buffering', '0');
     @ini_set('zlib.output_compression', '0');
     @ini_set('implicit_flush', '1');
-    @set_time_limit(0);
     if (function_exists('apache_setenv')) {
         @apache_setenv('no-gzip', '1');
     }
@@ -123,11 +122,6 @@ function prepareStreaming(bool $sse): void
         @ob_end_flush();
     }
     ob_implicit_flush(true);
-
-    if ($sse) {
-        header('Cache-Control: no-cache, no-store, must-revalidate');
-        header('X-Accel-Buffering: no');
-    }
 }
 
 function forwardRequestHeaders(array $config, int $bodyLength): array
@@ -214,19 +208,34 @@ if ($basePath !== '' && $requestPath !== $basePath && !str_starts_with($requestP
 
 $relativePath = $basePath === '' ? $requestPath : substr($requestPath, strlen($basePath));
 $relativePath = $relativePath === '' ? '/' : $relativePath;
+$method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
 
-if ($relativePath === '/' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
+if ($relativePath === '/' && $method === 'GET') {
     jsonResponse(200, [
         'status' => 'ok',
         'service' => PROXY_NAME,
         'version' => PROXY_VERSION,
         'mcpEndpoint' => publicUrl($basePath . '/mcp'),
         'healthEndpoint' => publicUrl($basePath . '/health'),
+        'transport' => 'streamable-http',
+        'supportedMethods' => ['POST', 'DELETE'],
     ]);
 }
 
 if ($relativePath === '/health') {
     jsonResponse(200, ['status' => 'ok', 'service' => PROXY_NAME, 'version' => PROXY_VERSION, 'time' => gmdate(DATE_ATOM)]);
+}
+
+if ($relativePath === '/mcp' && $method === 'GET') {
+    header('Allow: POST, DELETE');
+    jsonResponse(405, [
+        'jsonrpc' => '2.0',
+        'error' => [
+            'code' => -32000,
+            'message' => 'GET /mcp is not enabled by this PHP proxy; use MCP Streamable HTTP over POST.',
+        ],
+        'id' => null,
+    ]);
 }
 
 if (!function_exists('curl_init')) {
@@ -242,7 +251,6 @@ if ($allowed !== [] && !in_array($relativePath, $allowed, true)) {
     jsonResponse(404, ['status' => 'error', 'error' => 'path_not_proxied', 'path' => $relativePath]);
 }
 
-$method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
 $query = parse_url($requestUri, PHP_URL_QUERY);
 $backendUrl = $config['backend_url'] . $relativePath . (is_string($query) && $query !== '' ? '?' . $query : '');
 $body = file_get_contents('php://input');
@@ -253,9 +261,7 @@ if (strlen($body) > (int) $config['max_request_bytes']) {
     jsonResponse(413, ['status' => 'error', 'error' => 'request_too_large', 'maxBytes' => $config['max_request_bytes']]);
 }
 
-$isSse = $method === 'GET' && $relativePath === '/mcp'
-    && str_contains(strtolower(requestHeader('Accept') ?? ''), 'text/event-stream');
-prepareStreaming($isSse);
+prepareResponseStreaming();
 
 $started = false;
 $status = 502;
@@ -266,7 +272,7 @@ curl_setopt_array($curl, [
     CURLOPT_FOLLOWLOCATION => false,
     CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
     CURLOPT_CONNECTTIMEOUT => max(1, (int) $config['connect_timeout']),
-    CURLOPT_TIMEOUT => $isSse ? 0 : max(0, (int) $config['request_timeout']),
+    CURLOPT_TIMEOUT => max(0, (int) $config['request_timeout']),
     CURLOPT_HTTPHEADER => forwardRequestHeaders($config, strlen($body)),
     CURLOPT_HEADERFUNCTION => static function ($handle, string $line) use (&$started, &$status): int {
         $trimmed = trim($line);
