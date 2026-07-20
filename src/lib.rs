@@ -3,6 +3,7 @@ pub mod config;
 pub mod errors;
 pub mod http;
 pub mod protocol;
+pub mod resources;
 pub mod server;
 pub mod structures;
 pub mod tls;
@@ -14,7 +15,10 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(name = "MCP Filesystem Server")]
 #[command(version)]
-#[command(about = "High-performance Model Context Protocol server for filesystem access", long_about = None)]
+#[command(
+    about = "High-performance Model Context Protocol filesystem App Server",
+    long_about = None
+)]
 pub struct Args {
     /// Directories to allow access to (can specify multiple)
     #[arg(short, long)]
@@ -60,86 +64,73 @@ pub struct Args {
     #[arg(long, default_value = "30")]
     pub request_timeout: u64,
 
-    /// Maximum size in bytes of a single JSON-RPC request line (stdio).
-    /// Requests exceeding this are rejected to prevent memory exhaustion.
+    /// Maximum size in bytes of a single JSON-RPC request line (stdio)
     #[arg(long, default_value = "16777216")]
     pub max_request_bytes: usize,
 
-    /// Maximum size in bytes of a single HTTP JSON-RPC request body.
+    /// Maximum size in bytes of a single HTTP JSON-RPC request body
     #[arg(long, default_value = "16777216")]
     pub max_http_body_bytes: usize,
 
-    /// Optional bearer token required to access the HTTP transport.
-    /// When unset, the transport is unauthenticated.
+    /// Optional bearer token required to access HTTP transports
     #[arg(long)]
     pub auth_token: Option<String>,
 
-    /// Path to a PEM certificate chain to serve the HTTP transport over TLS
-    /// (HTTPS). Requires --tls-key. Falls back to the MCP_TLS_CERT env var.
-    /// When unset, the HTTP transport stays plaintext.
+    /// Path to a PEM certificate chain for HTTPS. Requires --tls-key.
     #[arg(long)]
     pub tls_cert: Option<String>,
 
-    /// Path to the PEM private key matching --tls-cert. Falls back to the
-    /// MCP_TLS_KEY env var.
+    /// Path to the PEM private key matching --tls-cert.
     #[arg(long)]
     pub tls_key: Option<String>,
 
-    // ── Tool exposure ────────────────────────────────────────────────────
-    // No tools are exposed unless explicitly enabled. Each flag turns on one
-    // category (hidden from tools/list and rejected from tools/call when its
-    // category is disabled). Use --enable-all for every category at once.
-    /// Expose ALL tool categories (overrides the individual flags).
+    /// Expose all tool categories.
     #[arg(long)]
     pub enable_all: bool,
 
-    /// Enable Read tools: read files, list/search/stat, hashes, disk usage.
+    /// Enable read/list/search/hash tools.
     #[arg(long)]
     pub enable_read: bool,
 
-    /// Enable Write tools: write/edit, create dir, move/copy, perms, symlink.
+    /// Enable write/edit/copy/move tools.
     #[arg(long)]
     pub enable_write: bool,
 
-    /// Enable Delete tools: delete file/directory.
+    /// Enable delete tools.
     #[arg(long)]
     pub enable_delete: bool,
 
-    /// Enable Compress tools: gzip, zstd, tar (de)compression.
+    /// Enable compression tools.
     #[arg(long)]
     pub enable_compress: bool,
 
-    /// Enable Crypto tools: encrypt/decrypt files and key generation.
+    /// Enable cryptography tools.
     #[arg(long)]
     pub enable_crypto: bool,
 
-    /// Enable CSV tools: CSV read/write helpers.
+    /// Enable CSV tools.
     #[arg(long)]
     pub enable_csv: bool,
 }
 
 impl Args {
-    /// Resolve the set of enabled tool categories from the `--enable-*` flags.
-    /// `--enable-all` turns on every category; otherwise only the categories
-    /// whose individual flag is set. With no flags, the result is empty and no
-    /// tools are exposed.
     pub fn enabled_categories(&self) -> Vec<tools::ToolCategory> {
-        use tools::ToolCategory as C;
+        use tools::ToolCategory as Category;
         if self.enable_all {
-            return C::ALL.to_vec();
+            return Category::ALL.to_vec();
         }
-        let mut cats = Vec::new();
-        let mut push = |on: bool, cat: C| {
-            if on {
-                cats.push(cat);
+        let mut categories = Vec::new();
+        let mut push = |enabled: bool, category: Category| {
+            if enabled {
+                categories.push(category);
             }
         };
-        push(self.enable_read, C::Read);
-        push(self.enable_write, C::Write);
-        push(self.enable_delete, C::Delete);
-        push(self.enable_compress, C::Compress);
-        push(self.enable_crypto, C::Crypto);
-        push(self.enable_csv, C::Csv);
-        cats
+        push(self.enable_read, Category::Read);
+        push(self.enable_write, Category::Write);
+        push(self.enable_delete, Category::Delete);
+        push(self.enable_compress, Category::Compress);
+        push(self.enable_crypto, Category::Crypto);
+        push(self.enable_csv, Category::Csv);
+        categories
     }
 }
