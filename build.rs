@@ -38,7 +38,10 @@ fn write_generated(out_dir: &Path, name: &str, source: &str) {
 fn strip_inner_doc_comments(source: &str) -> String {
     source
         .lines()
-        .map(|line| line.strip_prefix("//!").map_or_else(|| line.to_owned(), |rest| format!("//{rest}")))
+        .map(|line| {
+            line.strip_prefix("//!")
+                .map_or_else(|| line.to_owned(), |rest| format!("//{rest}"))
+        })
         .collect::<Vec<_>>()
         .join("\n")
         + "\n"
