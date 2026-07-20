@@ -26,8 +26,7 @@ pub fn build_tools_list_response(enabled: &[crate::tools::ToolCategory]) -> Vec<
         .map(enhance_tool_descriptor)
         .collect();
 
-    serde_json::to_vec(&json!({ "tools": tools }))
-        .expect("Failed to serialize tools/list response")
+    serde_json::to_vec(&json!({ "tools": tools })).expect("Failed to serialize tools/list response")
 }
 
 fn enhance_tool_descriptor(tool: &Value) -> Value {
@@ -275,7 +274,8 @@ impl MCPServer {
             match read_line_capped(&mut reader, &mut read_buffer, &mut line, max).await {
                 Ok(LineRead::Eof) => break,
                 Ok(LineRead::Line) => {
-                    process_one_line(&line, &self.config, &mut response_buffer, &mut stdout).await?;
+                    process_one_line(&line, &self.config, &mut response_buffer, &mut stdout)
+                        .await?;
                 }
                 Ok(LineRead::TooLong) => {
                     write_oversize_error(&mut response_buffer, &mut stdout, max).await?;
@@ -321,10 +321,7 @@ async fn process_one_line<W: AsyncWriteExt + Unpin>(
             )
             .await
             {
-                Ok(Ok(result)) => (
-                    JsonRpcResponse::success(request.id, result),
-                    notification,
-                ),
+                Ok(Ok(result)) => (JsonRpcResponse::success(request.id, result), notification),
                 Ok(Err(error)) => (
                     JsonRpcResponse::error(request.id, error.error_code(), error.to_string()),
                     notification,
@@ -566,9 +563,7 @@ async fn handle_tools_call(request: &JsonRpcRequest, config: &Config) -> MCSResu
             actions::csv::csv_read_column_values_range(arguments, config).await
         }
         "csv_read_row_range" => actions::csv::csv_read_row_range(arguments, config).await,
-        "csv_select_column_range" => {
-            actions::csv::csv_select_column_range(arguments, config).await
-        }
+        "csv_select_column_range" => actions::csv::csv_select_column_range(arguments, config).await,
         unknown => Err(method_not_found(unknown)),
     };
 

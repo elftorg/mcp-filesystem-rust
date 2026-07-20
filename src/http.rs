@@ -10,9 +10,7 @@ use axum::{
 };
 use futures::stream;
 use serde_json::{Value, json};
-use std::{
-    collections::HashSet, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration,
-};
+use std::{collections::HashSet, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tracing::{debug, error};
 use uuid::Uuid;
@@ -439,10 +437,7 @@ mod tests {
             resolve_addr("127.0.0.1", 3001).unwrap().to_string(),
             "127.0.0.1:3001"
         );
-        assert_eq!(
-            resolve_addr("::1", 3001).unwrap().to_string(),
-            "[::1]:3001"
-        );
+        assert_eq!(resolve_addr("::1", 3001).unwrap().to_string(), "[::1]:3001");
     }
 
     #[test]
