@@ -3,6 +3,8 @@ name: Diagnose ChatGPT MCP connector creation
 on:
   push:
     branches: [test/recheck-public-mcp-20260720]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
