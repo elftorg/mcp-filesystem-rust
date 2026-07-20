@@ -1,0 +1,82 @@
+name: Public MCP PR protocol test
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  endpoint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Complete MCP protocol flow
+        shell: bash
+        env:
+          MCP_URL: https://b24.alwaysdata.net/mcpfs/mcp
+        run: |
+          set -euo pipefail
+
+          curl -fsS --connect-timeout 8 --max-time 20 https://b24.alwaysdata.net/mcpfs/health | jq -e '.status == "ok"'
+          curl -fsS --connect-timeout 8 --max-time 20 https://b24.alwaysdata.net/mcpfs/health/backend | jq -e '.status == "up" and .backend.transport == "streamable-http"'
+
+          curl -fsS --connect-timeout 8 --max-time 20 -D init.h -o init.json \
+            -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"github-actions","version":"1.0"}}}' "$MCP_URL"
+          sid="$(grep -i '^mcp-session-id:' init.h | head -1 | cut -d: -f2- | tr -d ' \r')"
+          test -n "$sid"
+          jq -e '.result.protocolVersion == "2025-11-25" and .result.capabilities.tools and .result.capabilities.resources' init.json >/dev/null
+          jq '{protocolVersion:.result.protocolVersion,server:.result.serverInfo,capabilities:.result.capabilities}' init.json
+          echo "session=${sid:0:8}..."
+
+          call() {
+            id="$1"; method="$2"; params="$3"; output="$4"
+            curl -fsS --connect-timeout 8 --max-time 20 -o "$output" \
+              -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+              -H "MCP-Session-Id: $sid" -H 'MCP-Protocol-Version: 2025-11-25' \
+              --data "{\"jsonrpc\":\"2.0\",\"id\":$id,\"method\":\"$method\"$params}" "$MCP_URL"
+          }
+
+          notify="$(curl -sS --connect-timeout 8 --max-time 20 -o /tmp/notify -w '%{http_code}' \
+            -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            -H "MCP-Session-Id: $sid" -H 'MCP-Protocol-Version: 2025-11-25' \
+            --data '{"jsonrpc":"2.0","method":"notifications/initialized"}' "$MCP_URL")"
+          case "$notify" in 200|202|204) ;; *) cat /tmp/notify; exit 1;; esac
+          echo "initialized_http=$notify"
+
+          call 2 tools/list '' tools.json
+          jq -e '.result.tools | length > 0' tools.json >/dev/null
+          jq '{toolCount:(.result.tools|length),toolNames:(.result.tools|map(.name))}' tools.json
+
+          call 3 tools/call ',"params":{"name":"list_allowed_directories","arguments":{}}' tool-call.json
+          jq -e '.result.isError != true' tool-call.json >/dev/null
+          jq '{isError:.result.isError,structuredContent:.result.structuredContent}' tool-call.json
+
+          call 4 resources/list '' resources.json
+          jq -e '.result.resources | any(.uri == "ui://filesystem/browser-v1.html")' resources.json >/dev/null
+          jq '{resourceCount:(.result.resources|length),resourceUris:(.result.resources|map(.uri)|.[0:10])}' resources.json
+
+          call 5 resources/read ',"params":{"uri":"ui://filesystem/browser-v1.html"}' read.json
+          jq -e '.result.contents[0].mimeType | startswith("text/html")' read.json >/dev/null
+          jq '{uri:.result.contents[0].uri,mimeType:.result.contents[0].mimeType,textBytes:(.result.contents[0].text|length)}' read.json
+
+          set +e
+          curl -sS --no-buffer --connect-timeout 8 --max-time 6 -D sse.h -o sse.body \
+            -H 'Accept: text/event-stream' -H "MCP-Session-Id: $sid" \
+            -H 'MCP-Protocol-Version: 2025-11-25' "$MCP_URL"
+          sse_rc=$?
+          set -e
+          sse_code="$(awk '/^HTTP\// {code=$2} END {print code}' sse.h)"
+          sse_type="$(grep -i '^content-type:' sse.h | tail -1 | cut -d: -f2- | tr -d '\r' | xargs)"
+          echo "sse_http=$sse_code type=$sse_type rc=$sse_rc bytes=$(wc -c < sse.body)"
+          test "$sse_code" = 200
+          [[ "$sse_type" == text/event-stream* ]]
+          test "$sse_rc" -eq 0 -o "$sse_rc" -eq 28
+
+          deleted="$(curl -sS --connect-timeout 8 --max-time 20 -o /tmp/delete -w '%{http_code}' -X DELETE \
+            -H "MCP-Session-Id: $sid" -H 'MCP-Protocol-Version: 2025-11-25' "$MCP_URL")"
+          echo "delete_http=$deleted"
+          test "$deleted" = 204
+          echo 'ALL MCP CHECKS PASSED'
