@@ -1,0 +1,127 @@
+name: Public MCP endpoint test
+
+on:
+  push:
+    branches:
+      - codex/public-mcp-endpoint-test
+
+permissions:
+  contents: read
+
+jobs:
+  endpoint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Test MCP Streamable HTTP endpoint
+        shell: bash
+        env:
+          MCP_URL: https://b24.alwaysdata.net/mcpfs/mcp
+          HEALTH_URL: https://b24.alwaysdata.net/mcpfs/health
+          BACKEND_HEALTH_URL: https://b24.alwaysdata.net/mcpfs/health/backend
+        run: |
+          set -euo pipefail
+
+          echo '== Proxy health =='
+          curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 20 \
+            -D health.headers "$HEALTH_URL" -o health.json
+          cat health.headers
+          cat health.json
+          jq -e '.status == "ok"' health.json
+
+          echo '== Backend health =='
+          curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 20 \
+            -D backend-health.headers "$BACKEND_HEALTH_URL" -o backend-health.json
+          cat backend-health.headers
+          cat backend-health.json
+          jq -e '.status == "UP" or .status == "ok"' backend-health.json
+
+          echo '== initialize =='
+          curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 30 \
+            -D initialize.headers \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"github-actions-endpoint-test","version":"1.0"}}}' \
+            "$MCP_URL" -o initialize.body
+          cat initialize.headers
+          cat initialize.body
+
+          SESSION_ID="$(awk 'BEGIN { IGNORECASE=1 } /^MCP-Session-Id:/ { sub(/^[^:]+:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }' initialize.headers)"
+          test -n "$SESSION_ID"
+          jq -e '.jsonrpc == "2.0" and .result.protocolVersion != null and .result.capabilities.tools != null' initialize.body
+          echo "MCP session received: ${SESSION_ID:0:8}..."
+
+          echo '== notifications/initialized =='
+          NOTIFY_STATUS="$(curl --silent --show-error \
+            --connect-timeout 10 --max-time 20 \
+            -o initialized.body -w '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -H "MCP-Session-Id: $SESSION_ID" \
+            -H 'MCP-Protocol-Version: 2025-11-25' \
+            --data '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            "$MCP_URL")"
+          cat initialized.body || true
+          case "$NOTIFY_STATUS" in 200|202|204) ;; *) echo "Unexpected initialized status: $NOTIFY_STATUS"; exit 1;; esac
+
+          echo '== tools/list =='
+          curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 30 \
+            -D tools.headers \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -H "MCP-Session-Id: $SESSION_ID" \
+            -H 'MCP-Protocol-Version: 2025-11-25' \
+            --data '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            "$MCP_URL" -o tools.json
+          cat tools.headers
+          jq '{jsonrpc, id, toolCount:(.result.tools|length), toolNames:(.result.tools|map(.name))}' tools.json
+          jq -e '.result.tools | type == "array" and length > 0' tools.json
+
+          echo '== resources/list =='
+          curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 30 \
+            -D resources.headers \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -H "MCP-Session-Id: $SESSION_ID" \
+            -H 'MCP-Protocol-Version: 2025-11-25' \
+            --data '{"jsonrpc":"2.0","id":3,"method":"resources/list"}' \
+            "$MCP_URL" -o resources.json
+          cat resources.headers
+          jq '{jsonrpc, id, resourceCount:(.result.resources|length), resourceUris:(.result.resources|map(.uri)|.[0:10])}' resources.json
+          jq -e '.result.resources | type == "array" and length > 0' resources.json
+          jq -e '.result.resources | any(.uri == "ui://filesystem/browser-v1.html")' resources.json
+
+          echo '== GET SSE =='
+          set +e
+          curl --silent --show-error --no-buffer \
+            --connect-timeout 10 --max-time 5 \
+            -D sse.headers \
+            -H 'Accept: text/event-stream' \
+            -H "MCP-Session-Id: $SESSION_ID" \
+            -H 'MCP-Protocol-Version: 2025-11-25' \
+            "$MCP_URL" -o sse.body
+          SSE_CURL_STATUS=$?
+          set -e
+          cat sse.headers
+          cat sse.body || true
+          grep -qi '^HTTP/.* 200' sse.headers
+          grep -qi '^content-type: text/event-stream' sse.headers
+          test "$SSE_CURL_STATUS" -eq 0 -o "$SSE_CURL_STATUS" -eq 28
+
+          echo '== DELETE session =='
+          DELETE_STATUS="$(curl --silent --show-error \
+            --connect-timeout 10 --max-time 20 \
+            -o delete.body -w '%{http_code}' \
+            -X DELETE \
+            -H "MCP-Session-Id: $SESSION_ID" \
+            -H 'MCP-Protocol-Version: 2025-11-25' \
+            "$MCP_URL")"
+          cat delete.body || true
+          test "$DELETE_STATUS" = '204'
+
+          echo 'All public MCP endpoint checks passed.'
