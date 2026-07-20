@@ -1,0 +1,63 @@
+name: Public MCP SSE isolation test
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      MCP_URL: https://b24.alwaysdata.net/mcpfs/mcp
+    steps:
+      - name: Initialize
+        shell: bash
+        run: |
+          curl -fsS --connect-timeout 8 --max-time 25 -D h -o b \
+            -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"sse-isolation","version":"1.0"}}}' "$MCP_URL"
+          sid="$(grep -i '^mcp-session-id:' h | cut -d: -f2- | tr -d ' \r')"
+          test -n "$sid"
+          echo "SID=$sid" >> "$GITHUB_ENV"
+          echo "initialize_http=$(awk '/^HTTP\//{c=$2}END{print c}' h) session=${sid:0:8}..."
+
+      - name: GET SSE diagnostics
+        shell: bash
+        run: |
+          set +e
+          metrics=$(curl -sS --no-buffer --connect-timeout 8 --max-time 12 \
+            -D sse.headers -o sse.body \
+            -w 'code=%{http_code} start=%{time_starttransfer}s total=%{time_total}s bytes=%{size_download}' \
+            -H 'Accept: text/event-stream' -H "MCP-Session-Id: $SID" \
+            -H 'MCP-Protocol-Version: 2025-11-25' "$MCP_URL" 2>sse.err)
+          rc=$?
+          set -e
+          echo "curl_rc=$rc $metrics"
+          echo '-- headers --'; cat sse.headers || true
+          echo '-- error --'; cat sse.err || true
+          echo '-- body --'; head -c 1000 sse.body || true; echo
+          test "$rc" -eq 0 -o "$rc" -eq 28
+          grep -qi '^HTTP/.* 200' sse.headers
+          grep -qi '^content-type: text/event-stream' sse.headers
+
+      - name: DELETE session diagnostics
+        if: always() && env.SID != ''
+        shell: bash
+        run: |
+          set +e
+          metrics=$(curl -sS --connect-timeout 8 --max-time 20 -X DELETE \
+            -D delete.headers -o delete.body \
+            -w 'code=%{http_code} start=%{time_starttransfer}s total=%{time_total}s bytes=%{size_download}' \
+            -H "MCP-Session-Id: $SID" -H 'MCP-Protocol-Version: 2025-11-25' "$MCP_URL" 2>delete.err)
+          rc=$?
+          set -e
+          echo "curl_rc=$rc $metrics"
+          cat delete.headers || true
+          cat delete.err || true
+          cat delete.body || true
+          test "$rc" -eq 0
+          grep -qi '^HTTP/.* 204' delete.headers
