@@ -6,7 +6,7 @@ on:
       - main
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   apply:
@@ -125,20 +125,14 @@ jobs:
         run: exit 1
       - name: Format direct patch
         if: steps.patch.outputs.exit_code == '0'
+        run: cargo fmt --all
+      - name: Commit source changes only
+        if: steps.patch.outputs.exit_code == '0'
         shell: bash
         run: |
-          rm -f .github/workflows/apply-direct.yml
-          cargo fmt --all
-      - name: Export direct source patch
-        if: steps.patch.outputs.exit_code == '0'
-        uses: actions/upload-artifact@v4
-        with:
-          name: direct-source-patch
-          path: |
-            .github/workflows/ci.yml
-            Cargo.toml
-            src/actions/mod.rs
-            src/actions/files.rs
-            src/actions/compress.rs
-            src/lib.rs
-            src/validation.rs
+          git checkout HEAD -- .github/workflows/ci.yml .github/workflows/apply-direct.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A Cargo.toml build.rs src/actions/mod.rs src/actions/files.rs src/actions/compress.rs src/lib.rs src/validation.rs
+          git commit -m "fix: compile filesystem modules natively on Windows"
+          git push origin HEAD:codex/windows-compat
