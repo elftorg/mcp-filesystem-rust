@@ -2,9 +2,19 @@
 
 This directory contains a shared-hosting reverse proxy for
 `mcp-filesystem-rust`. It preserves MCP session and protocol headers, forwards
-Bearer authorization, streams Server-Sent Events without application-level
-buffering, strips the public path prefix, and exposes proxy/backend health
-checks.
+Bearer authorization, strips the public path prefix, and exposes proxy/backend
+health checks.
+
+The PHP deployment intentionally uses the request/response form of MCP
+Streamable HTTP:
+
+- `POST /mcp` forwards MCP JSON-RPC messages to the Rust server;
+- `DELETE /mcp` forwards session termination requests;
+- `GET /mcp` returns `405 Method Not Allowed` immediately.
+
+The optional long-lived `GET /mcp` SSE channel is disabled because shared PHP
+hosting can buffer it or leave a PHP worker blocked indefinitely. This does not
+disable MCP Streamable HTTP: normal MCP operations continue over `POST /mcp`.
 
 ## Requirements
 
@@ -13,11 +23,6 @@ checks.
 - Apache with `mod_rewrite` for the included `.htaccess`;
 - a public HTTPS website;
 - a reachable `mcp-filesystem-rust` HTTP backend.
-
-A long-lived `GET /mcp` request must be allowed by the hosting platform. Some
-shared hosts impose a hard PHP execution limit that cannot be disabled from
-application code; in that case use Nginx, Caddy, Cloudflare Tunnel, or the Rust
-server's built-in TLS instead.
 
 ## Install
 
@@ -44,7 +49,7 @@ Set `backend_url` in `config.php`, or configure environment variables:
 | `MCP_BACKEND_URL` | `http://services-b24.alwaysdata.net:8345` | Rust MCP origin |
 | `MCP_PROXY_BASE_PATH` | `/mcpfs` | Public URL prefix stripped before forwarding |
 | `MCP_PROXY_CONNECT_TIMEOUT` | `5` | Upstream connect timeout in seconds |
-| `MCP_PROXY_REQUEST_TIMEOUT` | `60` | Non-SSE request timeout; `0` disables it |
+| `MCP_PROXY_REQUEST_TIMEOUT` | `60` | Proxied request timeout; `0` disables it |
 | `MCP_PROXY_MAX_REQUEST_BYTES` | `16777216` | Maximum request body |
 | `MCP_PROXY_ALLOWED_PATHS` | MCP and diagnostic paths | Comma-separated exact paths |
 | `MCP_PROXY_FORWARD_ORIGINAL_HOST` | `false` | Forward the public `Host` header |
@@ -122,6 +127,20 @@ curl https://your-domain.example/mcpfs/mcp \
   -H 'mcp-session-id: <session-id>' \
   -H 'mcp-protocol-version: 2025-11-25' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+```
+
+Verify that the optional GET stream is rejected without blocking a PHP worker:
+
+```bash
+curl -i https://your-domain.example/mcpfs/mcp \
+  -H 'accept: text/event-stream'
+```
+
+Expected response:
+
+```text
+HTTP/2 405
+Allow: POST, DELETE
 ```
 
 ## Security
