@@ -12,7 +12,7 @@ permissions:
 jobs:
   endpoint:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 6
     env:
       MCP_URL: https://b24.alwaysdata.net/mcpfs/mcp
       HEALTH_URL: https://b24.alwaysdata.net/mcpfs/health
@@ -22,11 +22,12 @@ jobs:
       - name: Probe endpoint with and without ChatGPT Origin
         shell: bash
         run: |
+          set +e
           set -u
           probe() {
             name="$1"; shift
             rm -f headers body err
-            metrics=$(curl -sS --connect-timeout 8 --max-time 20 -D headers -o body \
+            metrics=$(curl -sS --connect-timeout 8 --max-time 15 -D headers -o body \
               -w 'code=%{http_code} start=%{time_starttransfer}s total=%{time_total}s bytes=%{size_download}' \
               "$@" 2>err)
             rc=$?
@@ -34,8 +35,9 @@ jobs:
             echo "rc=$rc $metrics"
             cat headers 2>/dev/null || true
             cat err 2>/dev/null || true
-            head -c 1200 body 2>/dev/null || true
+            head -c 800 body 2>/dev/null || true
             echo
+            return 0
           }
 
           probe 'health no origin' "$HEALTH_URL"
