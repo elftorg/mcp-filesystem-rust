@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Filesystem Browser</title>
+  <style>/*__APP_STYLE__*/</style>
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div>
+        <h1>Filesystem Browser</h1>
+        <p id="pathLabel">Sandboxed files</p>
+      </div>
+      <button id="refreshButton" type="button">Refresh</button>
+    </header>
+    <div class="toolbar">
+      <input id="pathInput" aria-label="Directory path" placeholder="/storage">
+      <button id="openButton" type="button">Open</button>
+      <input id="searchInput" aria-label="Search pattern" placeholder="**/*.md">
+      <button id="searchButton" type="button">Search</button>
+    </div>
+    <section class="workspace">
+      <aside>
+        <div id="status" role="status">Ready</div>
+        <ul id="files" class="files"></ul>
+      </aside>
+      <article id="preview" class="preview">
+        <div class="empty">Select a file to preview it.</div>
+      </article>
+    </section>
+  </main>
+  <script>/*__APP_SCRIPT__*/</script>
+</body>
+</html>
